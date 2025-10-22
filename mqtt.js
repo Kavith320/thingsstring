@@ -32,7 +32,7 @@ export function startMqtt() {
 
   client.on("message", async (topic, buf) => {
     try {
-      // Topic format: devices/<deviceId>/telemetry
+      // Topic format: tsdevices/<deviceId>/telemetry
       const parts = topic.split("/");
       const deviceId = parts[1];
       if (!deviceId) return console.warn("⚠️ Missing deviceId in topic:", topic);
@@ -42,29 +42,25 @@ export function startMqtt() {
       try { payload = JSON.parse(buf.toString()); }
       catch { console.error("❌ Bad JSON payload, skipping:", buf.toString()); return; }
 
-      // Use payload.ts if present, otherwise server time
+      // Use payload.ts if present, otherwise current time
       const ts = payload.ts ? new Date(payload.ts) : new Date();
       const isoTs = ts.toISOString();
+      const safeTs = isoTs.replace(/\./g, "_"); // <-- FIXED HERE
 
-      // Optional user mapping (if you include userId in payload)
       const userId = payload.userId || null;
-
-      // Avoid duplicating fields under the timestamp node
       const { ts: _t, deviceId: _d, userId: _u, ...data } = payload;
 
-      // Append into the single device doc:
-      //  - create the doc if it doesn't exist
-      //  - set data.<isoTs> = { ...data }
+      // Save in Mongo
       await Telemetry.updateOne(
         { deviceId },
         {
           $setOnInsert: { deviceId, userId, createdAt: new Date() },
-          $set: { [`data.${isoTs}`]: data }
+          $set: { [`data.${safeTs}`]: data },
         },
         { upsert: true }
       );
 
-      console.log(`💾 [${deviceId}] + ${isoTs}  (${Object.keys(data).join(", ") || "no fields"})`);
+      console.log(`💾 [${deviceId}] + ${safeTs} (${Object.keys(data).join(", ") || "no fields"})`);
     } catch (e) {
       console.error("MQTT handler error:", e);
     }
