@@ -1,5 +1,7 @@
 // src/controllers/schedules.controller.js
-const { ObjectId } = require("mongodb");
+const mongoose = require("mongoose");
+const { ObjectId } = mongoose.Types;
+
 const { getDb } = require("../db/mongo");
 
 function isObject(v) {
