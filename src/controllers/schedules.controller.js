@@ -266,6 +266,11 @@ async function updateSchedule(req, res) {
 async function deleteSchedule(req, res) {
   try {
     const db = getDb();
+
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
     const userMongoId = req.user.id;
     const { scheduleId } = req.params;
 
@@ -277,7 +282,6 @@ async function deleteSchedule(req, res) {
     }
 
     const schedulesCol = db.collection("device_schedules");
-
     const result = await schedulesCol.deleteOne({ _id, user_id: userMongoId });
 
     if (result.deletedCount === 0) {
@@ -289,6 +293,7 @@ async function deleteSchedule(req, res) {
     return res.status(500).json({ ok: false, error: e.message });
   }
 }
+
 
 module.exports = {
   createDeviceSchedule,
