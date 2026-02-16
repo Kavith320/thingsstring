@@ -57,7 +57,7 @@ function startMqtt() {
 
   mqttClient.on("message", async (topic, payloadBuf) => {
     // Expect:
-    // ts/<deviceId>/config
+    // <devicets/Id>/config
     // ts/<deviceId>/telemetry
     const parts = topic.split("/");
     if (parts.length !== 3) return;
