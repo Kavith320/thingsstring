@@ -2,12 +2,14 @@
 require("dotenv").config();
 
 const { connectMongo } = require("../db/mongo");
+const { startMqtt } = require("../mqtt/client");
 const Agenda = require("agenda");
 const { defineFlowJobs } = require("./flowJobs");
 const { startFlowSync } = require("./flowSync");
 
 async function startWorker() {
     await connectMongo();
+    startMqtt(); // Initialize MQTT client for publishing commands
 
     const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) throw new Error("MONGO_URI missing in .env");

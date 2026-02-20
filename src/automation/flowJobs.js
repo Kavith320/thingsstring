@@ -1,4 +1,5 @@
 const { getDb } = require("../db/mongo");
+const { getMqttClient } = require("../mqtt/client");
 const mongoose = require("mongoose");
 const { ObjectId } = mongoose.Types;
 
@@ -159,6 +160,19 @@ function defineFlowJobs(agenda) {
                 { $set: { [updateKey]: flow.action.setValue } },
                 { upsert: true }
             );
+
+            // Fetch the full updated doc and publish to MQTT
+            const controlDoc = await controlCol.findOne({ _id: actuatorDeviceId });
+            try {
+                const client = getMqttClient();
+                client.publish(
+                    `ts/${actuatorDeviceId}/control`,
+                    JSON.stringify(controlDoc),
+                    { qos: 1, retain: true }
+                );
+            } catch (mqttErr) {
+                console.error(`❌ [AUTOMATION] MQTT Publish failed for ${actuatorDeviceId}:`, mqttErr.message);
+            }
 
             console.log(`✅ [AUTOMATION] Flow ${flow.name} triggered. Set ${actuatorKey} to ${flow.action.setValue} on device ${actuatorDeviceId}`);
 
