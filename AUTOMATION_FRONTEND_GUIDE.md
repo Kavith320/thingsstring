@@ -1,121 +1,81 @@
-# Automation Engine: Frontend Development Guide
+# Automation Engine v1: Visual Designer Integration Guide
 
-This guide provides the necessary information to build a frontend interface for the ThingsString Automation Engine.
+This guide defines the interface between the **React Flow Visual Canvas** and the **Express Backend**.
 
-## Base URL
-All automation endpoints are prefixed with: `/api/automation`
-
-## Data Models
+## 1. Core Data Structure
+The frontend should manage the following object structure for every automation flow.
 
 ### Automation Flow Object
-```json
-{
-  "_id": "string (ObjectId)",
-  "user_id": "string",
-  "name": "string",
-  "deviceId": "string",
-  "enabled": "boolean",
-  "intervalSec": "number (5-3600)",
-  "metricPath": "string (dot-notation, e.g., 'data.temp')",
-  "deltaThreshold": "number (positive)",
-  "action": {
-    "actuatorKey": "string (must exist in device_config)",
-    "setValue": "boolean | number"
-  },
-  "cooldownSec": "number (seconds)",
-  "createdAt": "date",
-  "updatedAt": "date"
-}
-```
-
-### Flow Log Object
-```json
-{
-  "_id": "string",
-  "flowId": "string",
-  "ts": "date",
-  "status": "ran | skipped | error",
-  "reason": "string (optional)",
-  "currentValue": "number",
-  "previousValue": "number",
-  "delta": "number",
-  "action": "object (if triggered)"
-}
-```
-
-## API Endpoints
-
-### 1. List All Flows
-`GET /api/automation/flows`
-- **Auth**: Bearer Token required.
-- **Response**: `{ ok: true, flows: [...] }`
-
-### 2. Create Flow
-`POST /api/automation/flows`
-- **Body**: 
-  ```json
-  {
-    "name": "My Flow",
-    "deviceId": "ESP32_01",
-    "intervalSec": 30,
-    "metricPath": "temp",
-    "deltaThreshold": 1.5,
-    "action": {
-      "actuatorKey": "relay1",
-      "setValue": true
-    },
-    "cooldownSec": 60
-  }
-  ```
-- **Response**: `{ ok: true, flowId: "..." }`
-
-### 3. Update Flow
-`PUT /api/automation/flows/:id`
-- **Body**: Any subset of flow fields.
-- **Response**: `{ ok: true, flow: { ...updatedFlow } }`
-
-### 4. Delete Flow
-`DELETE /api/automation/flows/:id`
-- **Response**: `{ ok: true }`
-
-### 5. Get Flow Logs
-`GET /api/automation/flows/:id/logs?limit=20`
-- **Auth**: Bearer Token required.
-- **Response**: `{ ok: true, logs: [...] }`
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `name` | string | Name of the automation (e.g. "Greenhouse Temp") |
+| `deviceId` | string | **Sensor Hub ID.** Provides the telemetry data. |
+| `enabled` | boolean | Global toggle for the flow. |
+| `intervalSec` | number | Polling rate in seconds (minimum 5s). |
+| `metricPath` | string | JSON path to monitor (e.g. `sensors.temp`). |
+| `deltaThreshold` | number | Minimum change needed to trigger (float). |
+| `cooldownSec` | number | Seconds to wait before re-triggering. |
+| **`action`** | object | Target command details. |
+| `action.deviceId` | string | **Actuator Hub ID.** (Can be different hub). |
+| `action.actuatorKey`| string | Name of pin/channel (e.g. `relay1`). |
+| `action.setValue` | mixed | The command to send (e.g `true`, `1`, `"ON"`). |
+| **`ui_metadata`** | object | **IMPORTANT.** Persist nodes/edges coordinates here. |
 
 ---
 
-## Frontend Implementation Tips
+## 2. API Reference
 
-### 1. Device & Actuator Selection
-- Use `GET /api/devices` to fetch the user's devices.
-- When a user selects a `deviceId`, look into its `config.actuators` to populate the `actuatorKey` dropdown.
-- **Crucial**: Inform the user that the actuator must have `auto: true` in its configuration for the automation to work.
+### Create a Flow
+`POST /api/automation/flows`
+- **Frontend sends**: All fields (including `ui_metadata`). **Do not send `_id`**.
+- **Backend returns**: `{ ok: true, flow: { ...object_with_id } }`
+- **Tip**: Update your local state with the returned `flow` to get the generated `_id`.
 
-### 2. Metric Path Helper
-- The `metricPath` is a dot-notation string used to extract values from the telemetry payload.
-- **Suggestion**: Show the user a sample of the "Latest Telemetry" for the selected device so they know what keys are available (e.g., `temp`, `data.humidity`, `vcc`).
+### Update a Flow
+`PUT /api/automation/flows/:id`
+- **Frontend sends**: Any fields that changed.
+- **Backend Note**: The backend will automatically ignore `_id` and `user_id` if you send them in the body, preventing "Immutable Field" errors.
+- **Response**: `{ ok: true, flow: { ...updated_object } }`
 
-### 3. Delta Threshold Explanation
-- Explain that the automation triggers only when the difference between the *new* value and the *last processed* value exceeds the `deltaThreshold`.
+### List Flows
+`GET /api/automation/flows`
+- **Response**: `{ ok: true, flows: [...] }`
 
-### 4. Monitoring
-- Use the `/logs` endpoint to show a "Last Run" status and a history table in the UI. This helps users verify if their thresholds are too high or if cooldowns are preventing actions.
+### Delete Flow
+`DELETE /api/automation/flows/:id`
+- **Response**: `{ ok: true }`
 
-### 5. Manual vs Auto Toggle
-- Since the automation engine only writes to actuators in `auto` mode, provide a way for users to toggle the actuator's mode (this is usually done via the existing `/api/devices/:deviceId/control` endpoint).
+---
 
-## JS Fetch Example
-```javascript
-const createFlow = async (flowData, token) => {
-  const response = await fetch('/api/automation/flows', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(flowData)
-  });
-  return response.json();
-};
+## 3. Integration Rules for Visual Designer
+
+### A. The "Auto Mode" Prerequisite
+The backend worker will **only** execute commands if the target actuator is set to `auto` in the device configuration.
+- **UI Logic**: When setting up an action node, display a warning: *"Ensure this actuator is in AUTO mode in the Device Panel."*
+
+### B. Canvas Persistence (`ui_metadata`)
+To prevent nodes from moving to `(0,0)` on every refresh:
+1.  Store your React Flow `nodes` and `edges` inside the `ui_metadata` object.
+2.  Send the entire object during `PUT` calls.
+3.  The backend stores this as an opaque JSON object.
+
+### C. Standardized Commands
+Standardize on the field name **`setValue`** for the command payload. This ensures compatibility with the Execution History logs.
+
+### D. Multi-Hub Logic
+The designer now allows cross-device triggering. 
+- The top-level `deviceId` remains the **Sensor**.
+- The `action.deviceId` is the **Actuator**.
+- If the user selects the same hub for both, just set them both to the same ID.
+
+---
+
+## 4. Error Handling
+The backend will never return an empty `{}` for errors. You should expect:
+```json
+{
+  "ok": false, 
+  "error": "Detailed description of what went wrong"
+}
 ```
+Use this `error` string to show a Toast notification on the frontend.
