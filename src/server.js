@@ -48,7 +48,7 @@ app.listen(PORT, async () => {
   await connectMongo();
 
   // 2) Connect MQTT
-  startMqtt();
+  startMqtt("thingsstring-api");
 
   // 3) Publish current control state once (retain)
   await publishAllControlsOnce();

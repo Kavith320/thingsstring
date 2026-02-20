@@ -9,7 +9,7 @@ const { startFlowSync } = require("./flowSync");
 
 async function startWorker() {
     await connectMongo();
-    startMqtt(); // Initialize MQTT client for publishing commands
+    startMqtt("thingsstring-automation"); // Initialize MQTT client for publishing commands
 
     const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) throw new Error("MONGO_URI missing in .env");

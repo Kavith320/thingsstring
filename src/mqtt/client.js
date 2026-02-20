@@ -33,22 +33,27 @@ async function ensureDeviceControlFromConfig(db, deviceId, configPayload) {
   );
 }
 
-function startMqtt() {
+function startMqtt(customClientId = null) {
   const url = process.env.MQTT_URL;
   const subTopic = process.env.MQTT_TOPIC || "ts/#";
 
   if (!url) throw new Error("❌ MQTT_URL missing in .env");
 
+  // Use provided ID, or env ID, or a default. 
+  // Append a unique suffix if multiple processes use the same ID from env.
+  const baseId = customClientId || process.env.MQTT_CLIENT_ID || "thingsstring-backend";
+  const clientId = customClientId ? baseId : `${baseId}-${Math.random().toString(16).slice(2, 6)}`;
+
   // ✅ store globally so other modules can publish
   mqttClient = mqtt.connect(url, {
-    clientId: process.env.MQTT_CLIENT_ID,
+    clientId,
     reconnectPeriod: 2000,
     username: process.env.MQTT_USERNAME || undefined,
     password: process.env.MQTT_PASSWORD || undefined,
   });
 
   mqttClient.on("connect", () => {
-    console.log(`✅ MQTT connected: ${url}`);
+    console.log(`✅ MQTT connected: ${url} (ID: ${clientId})`);
     mqttClient.subscribe(subTopic, (err) => {
       if (err) console.error("❌ MQTT subscribe error:", err.message);
       else console.log(`📡 Subscribed to: ${subTopic}`);
@@ -57,13 +62,16 @@ function startMqtt() {
 
   mqttClient.on("message", async (topic, payloadBuf) => {
     // Expect:
-    // <devicets/Id>/config
+    // ts/<deviceId>/config
     // ts/<deviceId>/telemetry
     const parts = topic.split("/");
     if (parts.length !== 3) return;
 
     const [root, deviceId, type] = parts;
     if (root !== "ts") return;
+
+    // Only process config and telemetry
+    if (type !== "config" && type !== "telemetry") return;
 
     let payload;
     try {
