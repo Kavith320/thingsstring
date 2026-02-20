@@ -52,7 +52,12 @@ function defineFlowJobs(agenda) {
             // 3) Extract currentValue
             const currentValue = getNestedValue(latestTelemetry, flow.metricPath);
 
-            // 4) Evaluate Conditions
+            // 4) Load flow state
+            const flowState = (await flowStateCol.findOne({ flowId: new ObjectId(flowId) })) || {};
+            const { lastValue, lastActionTs } = flowState;
+            const delta = lastValue !== undefined ? Math.abs(currentValue - lastValue) : null;
+
+            // 5) Evaluate Conditions
             let conditionMet = false;
 
             // Supporting new 'operator' logic
@@ -69,12 +74,8 @@ function defineFlowJobs(agenda) {
                     default: conditionMet = false;
                 }
             } else {
-                // Fallback to legacy Delta Threshold logic if no operator provided
-                const flowState = (await flowStateCol.findOne({ flowId: new ObjectId(flowId) })) || {};
-                const { lastValue } = flowState;
-
+                // Fallback to legacy Delta Threshold logic
                 if (lastValue !== undefined) {
-                    const delta = Math.abs(currentValue - lastValue);
                     conditionMet = delta > (flow.deltaThreshold || 0);
                 } else {
                     // First run: save value and skip
@@ -87,7 +88,7 @@ function defineFlowJobs(agenda) {
                 }
             }
 
-            // 5) If condition isn't met, just update lastValue and exit
+            // 6) If condition isn't met, just update lastValue and exit
             if (!conditionMet) {
                 await flowStateCol.updateOne(
                     { flowId: new ObjectId(flowId) },
@@ -97,9 +98,7 @@ function defineFlowJobs(agenda) {
                 return;
             }
 
-            // 6) Cooldown check
-            const flowState = (await flowStateCol.findOne({ flowId: new ObjectId(flowId) })) || {};
-            const { lastActionTs, lastValue } = flowState;
+            // 7) Cooldown check
             const now = new Date();
 
             if (lastActionTs && (now - new Date(lastActionTs)) < (flow.cooldownSec * 1000)) {
