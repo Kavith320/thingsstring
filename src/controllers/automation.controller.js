@@ -1,5 +1,6 @@
 const { getDb } = require("../db/mongo");
-const { ObjectId } = require("mongodb");
+const mongoose = require("mongoose");
+const { ObjectId } = mongoose.Types;
 
 /**
  * Automation Flow CRUD Controller

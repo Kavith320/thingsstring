@@ -1,5 +1,6 @@
 const { getDb } = require("../db/mongo");
-const { ObjectId } = require("mongodb");
+const mongoose = require("mongoose");
+const { ObjectId } = mongoose.Types;
 
 /**
  * Helper to get nested value from object using dot notation
