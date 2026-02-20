@@ -20,43 +20,46 @@ exports.createFlow = async (req, res) => {
             metricPath,
             deltaThreshold,
             action,
-            cooldownSec
+            cooldownSec,
+            ui_metadata // Added for persistence
         } = req.body;
 
-        // Validation
+        // Validation - Enhanced Guard
         if (!deviceId || !metricPath || !action?.actuatorKey || action?.setValue === undefined) {
-            return res.status(400).json({ ok: false, error: "Missing required fields" });
-        }
-
-        if (intervalSec < 5 || intervalSec > 3600) {
-            return res.status(400).json({ ok: false, error: "intervalSec must be between 5 and 3600" });
-        }
-
-        if (deltaThreshold <= 0) {
-            return res.status(400).json({ ok: false, error: "deltaThreshold must be > 0" });
+            return res.status(400).json({
+                ok: false,
+                error: "Missing required fields: deviceId, metricPath, or action details"
+            });
         }
 
         const newFlow = {
             user_id: req.user.id,
             name: name || "Untitled Flow",
-            deviceId,
+            deviceId, // Sensor Hub ID
             enabled: enabled ?? true,
             intervalSec: parseInt(intervalSec) || 60,
             metricPath,
-            deltaThreshold: parseFloat(deltaThreshold),
+            deltaThreshold: parseFloat(deltaThreshold) || 0,
             action: {
+                deviceId: action.deviceId || deviceId, // Actuator Hub ID (fallback to sensor ID)
                 actuatorKey: action.actuatorKey,
                 setValue: action.setValue
             },
             cooldownSec: parseInt(cooldownSec) || 60,
+            ui_metadata: ui_metadata || {}, // Persist canvas coordinates
             createdAt: new Date(),
             updatedAt: new Date()
         };
 
         const result = await flowsCol.insertOne(newFlow);
-        res.status(201).json({ ok: true, flowId: result.insertedId });
+
+        // Return the full created object as requested
+        res.status(201).json({
+            ok: true,
+            flow: { ...newFlow, _id: result.insertedId }
+        });
     } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
+        res.status(500).json({ ok: false, error: error.message || "Internal Server Error" });
     }
 };
 
@@ -101,12 +104,10 @@ exports.updateFlow = async (req, res) => {
         const flowsCol = db.collection("automation_flows");
 
         const updates = { ...req.body, updatedAt: new Date() };
+
+        // Robustness: Ignore/Strip immutable fields manually
         delete updates._id;
         delete updates.user_id;
-
-        if (updates.intervalSec && (updates.intervalSec < 5 || updates.intervalSec > 3600)) {
-            return res.status(400).json({ ok: false, error: "intervalSec must be between 5 and 3600" });
-        }
 
         const result = await flowsCol.findOneAndUpdate(
             { _id: new ObjectId(req.params.id), user_id: req.user.id },

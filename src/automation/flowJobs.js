@@ -111,8 +111,9 @@ function defineFlowJobs(agenda) {
             }
 
             // 8) Update device_control
-            // Reusing logic from src/scheduler/jobs.js
-            const control = (await controlCol.findOne({ _id: flow.deviceId })) || {};
+            // Requirement: Use action.deviceId for the command, NOT the top-level sensor deviceId
+            const actuatorDeviceId = flow.action.deviceId || flow.deviceId;
+            const control = (await controlCol.findOne({ _id: actuatorDeviceId })) || {};
             const actuators = control.actuators || {};
             const actuatorKey = flow.action.actuatorKey;
 
@@ -148,16 +149,15 @@ function defineFlowJobs(agenda) {
                 return;
             }
 
-            // Apply action
-            // We only update the value key for the actuator
+            // Apply action: Standardized on setValue
             const updateKey = `actuators.${actuatorKey}.value`;
             await controlCol.updateOne(
-                { _id: flow.deviceId },
+                { _id: actuatorDeviceId },
                 { $set: { [updateKey]: flow.action.setValue } },
                 { upsert: true }
             );
 
-            console.log(`✅ [AUTOMATION] Flow ${flow.name} (${flowId}) triggered. Set ${actuatorKey} to ${flow.action.setValue}`);
+            console.log(`✅ [AUTOMATION] Flow ${flow.name} triggered. Set ${actuatorKey} to ${flow.action.setValue} on device ${actuatorDeviceId}`);
 
             // 9) Update flow state
             await flowStateCol.updateOne(
