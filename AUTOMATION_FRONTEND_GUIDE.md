@@ -13,7 +13,10 @@ The frontend should manage the following object structure for every automation f
 | `enabled` | boolean | Global toggle for the flow. |
 | `intervalSec` | number | Polling rate in seconds (minimum 5s). |
 | `metricPath` | string | JSON path to monitor (e.g. `sensors.temp`). |
-| `deltaThreshold` | number | Minimum change needed to trigger (float). |
+| `deltaThreshold`| number | (Optional) Fallback: Trigger if change > this value. |
+| **`condition`** | object | **NEW.** Logical rule for triggering. |
+| `condition.operator`| string | One of: `>`, `<`, `>=`, `<=`, `==`, `!=`. |
+| `condition.value`| number | The target value to compare against. |
 | `cooldownSec` | number | Seconds to wait before re-triggering. |
 | **`action`** | object | Target command details. |
 | `action.deviceId` | string | **Actuator Hub ID.** (Can be different hub). |
@@ -67,6 +70,12 @@ The designer now allows cross-device triggering.
 - The top-level `deviceId` remains the **Sensor**.
 - The `action.deviceId` is the **Actuator**.
 - If the user selects the same hub for both, just set them both to the same ID.
+
+### E. Algebraic Conditions
+The backend now supports explicit comparison logic.
+- **Node Configuration**: Give users a dropdown for operators (`>`, `<`, `==`, etc.).
+- **Fallback**: If the `condition` object is missing, the backend defaults to the `deltaThreshold` logic (triggering if the value *changes* by more than the threshold).
+- **Recommendation**: For most automations (e.g., "If Temp > 30"), use the `condition` object. Use `deltaThreshold` only for "Change Detector" style rules.
 
 ---
 

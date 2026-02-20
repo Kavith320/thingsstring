@@ -19,17 +19,21 @@ node src/automation/worker.js
 
 ## API Usage Examples
 
-### Create a Flow
+### Create a Flow (Algebraic Condition)
 **POST** `/api/automation/flows`
 ```json
 {
-  "name": "Temperature Control",
-  "deviceId": "ESP32_01",
+  "name": "Temperature Alert",
+  "deviceId": "SENSOR_HUB_01",
   "intervalSec": 10,
   "metricPath": "data.temperature",
-  "deltaThreshold": 0.5,
+  "condition": {
+    "operator": ">",
+    "value": 35
+  },
   "action": {
-    "actuatorKey": "fan",
+    "deviceId": "ACTUATOR_HUB_02",
+    "actuatorKey": "buzzer",
     "setValue": true
   },
   "cooldownSec": 300
@@ -40,13 +44,14 @@ node src/automation/worker.js
 **GET** `/api/automation/flows`
 
 ### Flow Logic
-- The worker polls the latest telemetry for the specified `deviceId` every `intervalSec`.
-- It extracts the value from the telemetry payload using `metricPath`.
-- It calculates `delta = abs(currentValue - lastValue)`.
-- If `delta > deltaThreshold` AND `cooldownSec` has passed:
-  - It checks if the actuator is in `auto` mode in `device_control`.
-  - If yes, it updates `device_control.actuators.<actuatorKey>.value` to `setValue`.
-- All actions are logged in the `automation_flow_logs` collection.
+1. **Poll**: The worker fetches the latest telemetry for the source `deviceId` every `intervalSec`.
+2. **Evaluate**: 
+   - If a `condition` object exists, it compares `currentValue` against `condition.value` using `condition.operator` (`>`, `<`, `==`, etc.).
+   - If no condition exists, it calculates `delta = abs(currentValue - lastValue)` and triggers if `delta > deltaThreshold`.
+3. **Control**: 
+   - It checks if the target actuator (on `action.deviceId`) is in `auto` mode in `device_control`.
+   - If yes, it updates the specific `actuatorKey` to `setValue`.
+4. **Log**: Every execution (skipped or ran) is recorded in `automation_flow_logs`.
 
 ## Database Collections
 - `automation_flows`: Flow definitions.

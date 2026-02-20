@@ -163,18 +163,27 @@ Polling-based rules to trigger actions based on sensor changes.
 **Body:**
 ```json
 {
-  "name": "Temp Trigger",
-  "deviceId": "ESP32_01",
-  "intervalSec": 10,
+  "name": "Intelligent Fan",
+  "deviceId": "SENSOR_HUB_01",
+  "intervalSec": 30,
   "metricPath": "data.temp",
-  "deltaThreshold": 1.0,
+  "condition": {
+    "operator": ">",
+    "value": 30
+  },
   "action": {
+    "deviceId": "ACTUATOR_HUB_02",
     "actuatorKey": "fan",
     "setValue": true
   },
-  "cooldownSec": 60
+  "cooldownSec": 300,
+  "ui_metadata": { "x": 100, "y": 200 }
 }
 ```
+**Notes:** 
+- If `condition` is omitted, `deltaThreshold` is used as a fallback.
+- `action.deviceId` allows triggering an actuator on a different hub than the sensor.
+- `ui_metadata` is an opaque object used for storing canvas layout positions.
 
 ### List Flows
 `GET /api/automation/flows`
