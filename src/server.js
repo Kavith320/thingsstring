@@ -14,6 +14,7 @@ const authRoutes = require("./routes/auth.routes");
 const deviceRoutes = require("./routes/devices.routes");
 const scheduleRoutes = require("./routes/schedules.routes"); // if you have it
 const adminRoutes = require("./routes/admin.routes");
+const automationRoutes = require("./routes/automation.routes");
 
 const app = express(); // ✅ must be BEFORE app.use()
 
@@ -36,6 +37,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/devices", deviceRoutes);
 app.use("/api/schedules", scheduleRoutes); // comment if you don’t have schedules.routes.js
 app.use("/api/admin", adminRoutes);
+app.use("/api/automation", automationRoutes);
 
 const PORT = process.env.PORT || 3000;
 

@@ -4,7 +4,7 @@ Welcome to the ThingsString API documentation. This document covers the REST API
 
 ## Base URL
 - **Production:** `https://api.thingsstring.com` (Example)
-- **Local Development:** `http://localhost:3000`
+- **Local Development:** `http://localhost:4000`
 
 ---
 
@@ -153,7 +153,39 @@ Updates the desired state of actuators on a device.
 
 ---
 
-## 4. MQTT Protocol (Device Side)
+## 5. Automation Engine
+
+Polling-based rules to trigger actions based on sensor changes.
+
+### Create Flow
+`POST /api/automation/flows`
+
+**Body:**
+```json
+{
+  "name": "Temp Trigger",
+  "deviceId": "ESP32_01",
+  "intervalSec": 10,
+  "metricPath": "data.temp",
+  "deltaThreshold": 1.0,
+  "action": {
+    "actuatorKey": "fan",
+    "setValue": true
+  },
+  "cooldownSec": 60
+}
+```
+
+### List Flows
+`GET /api/automation/flows`
+
+### Get Flow Logs
+`GET /api/automation/flows/:id/logs`
+Returns the recent execution history for a specific flow.
+
+---
+
+## 6. MQTT Protocol (Device Side)
 
 Devices communicate with the server using the `ts/` prefix.
 
