@@ -19,9 +19,10 @@ exports.createFlow = async (req, res) => {
             intervalSec,
             metricPath,
             deltaThreshold,
+            condition, // New logical condition object
             action,
             cooldownSec,
-            ui_metadata // Added for persistence
+            ui_metadata
         } = req.body;
 
         // Validation - Enhanced Guard
@@ -35,18 +36,19 @@ exports.createFlow = async (req, res) => {
         const newFlow = {
             user_id: req.user.id,
             name: name || "Untitled Flow",
-            deviceId, // Sensor Hub ID
+            deviceId,
             enabled: enabled ?? true,
             intervalSec: parseInt(intervalSec) || 60,
             metricPath,
             deltaThreshold: parseFloat(deltaThreshold) || 0,
+            condition: condition || null, // Stores { operator: ">", value: 30 }
             action: {
-                deviceId: action.deviceId || deviceId, // Actuator Hub ID (fallback to sensor ID)
+                deviceId: action.deviceId || deviceId,
                 actuatorKey: action.actuatorKey,
                 setValue: action.setValue
             },
             cooldownSec: parseInt(cooldownSec) || 60,
-            ui_metadata: ui_metadata || {}, // Persist canvas coordinates
+            ui_metadata: ui_metadata || {},
             createdAt: new Date(),
             updatedAt: new Date()
         };

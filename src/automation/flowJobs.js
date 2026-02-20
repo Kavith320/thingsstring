@@ -51,24 +51,44 @@ function defineFlowJobs(agenda) {
 
             // 3) Extract currentValue
             const currentValue = getNestedValue(latestTelemetry, flow.metricPath);
-            if (currentValue === undefined || typeof currentValue !== 'number') {
-                console.log(`[AUTOMATION] Invalid metric '${flow.metricPath}' for device ${flow.deviceId}. Value:`, currentValue);
-                await logsCol.insertOne({
-                    flowId: new ObjectId(flowId),
-                    ts: new Date(),
-                    status: "skipped",
-                    reason: "invalid metric",
-                    metricPath: flow.metricPath
-                });
-                return;
+
+            // 4) Evaluate Conditions
+            let conditionMet = false;
+
+            // Supporting new 'operator' logic
+            if (flow.condition && flow.condition.operator) {
+                const { operator, value: targetValue } = flow.condition;
+
+                switch (operator) {
+                    case ">": conditionMet = currentValue > targetValue; break;
+                    case "<": conditionMet = currentValue < targetValue; break;
+                    case ">=": conditionMet = currentValue >= targetValue; break;
+                    case "<=": conditionMet = currentValue <= targetValue; break;
+                    case "==": conditionMet = currentValue == targetValue; break;
+                    case "!=": conditionMet = currentValue != targetValue; break;
+                    default: conditionMet = false;
+                }
+            } else {
+                // Fallback to legacy Delta Threshold logic if no operator provided
+                const flowState = (await flowStateCol.findOne({ flowId: new ObjectId(flowId) })) || {};
+                const { lastValue } = flowState;
+
+                if (lastValue !== undefined) {
+                    const delta = Math.abs(currentValue - lastValue);
+                    conditionMet = delta > (flow.deltaThreshold || 0);
+                } else {
+                    // First run: save value and skip
+                    await flowStateCol.updateOne(
+                        { flowId: new ObjectId(flowId) },
+                        { $set: { lastValue: currentValue, lastValueTs: new Date() } },
+                        { upsert: true }
+                    );
+                    return;
+                }
             }
 
-            // 4) Load flow state
-            const flowState = (await flowStateCol.findOne({ flowId: new ObjectId(flowId) })) || {};
-            const { lastValue, lastActionTs } = flowState;
-
-            // If no previous lastValue, store and exit
-            if (lastValue === undefined) {
+            // 5) If condition isn't met, just update lastValue and exit
+            if (!conditionMet) {
                 await flowStateCol.updateOne(
                     { flowId: new ObjectId(flowId) },
                     { $set: { lastValue: currentValue, lastValueTs: new Date() } },
@@ -77,35 +97,19 @@ function defineFlowJobs(agenda) {
                 return;
             }
 
-            // 5) Compute delta
-            const delta = Math.abs(currentValue - lastValue);
-
-            // 6) Threshold check
-            if (delta <= flow.deltaThreshold) {
-                // Just update lastValue to keep it fresh
-                await flowStateCol.updateOne(
-                    { flowId: new ObjectId(flowId) },
-                    { $set: { lastValue: currentValue, lastValueTs: new Date() } }
-                );
-                return;
-            }
-
-            // 7) Cooldown check
+            // 6) Cooldown check
+            const flowState = (await flowStateCol.findOne({ flowId: new ObjectId(flowId) })) || {};
+            const { lastActionTs, lastValue } = flowState;
             const now = new Date();
+
             if (lastActionTs && (now - new Date(lastActionTs)) < (flow.cooldownSec * 1000)) {
-                // Cooldown active, update lastValue and exit
-                await flowStateCol.updateOne(
-                    { flowId: new ObjectId(flowId) },
-                    { $set: { lastValue: currentValue, lastValueTs: now } }
-                );
                 await logsCol.insertOne({
                     flowId: new ObjectId(flowId),
                     ts: now,
                     status: "skipped",
                     reason: "cooldown active",
                     currentValue,
-                    previousValue: lastValue,
-                    delta
+                    operator: flow.condition?.operator || "delta"
                 });
                 return;
             }
