@@ -115,14 +115,13 @@ function defineFlowJobs(agenda) {
             }
 
             // 8) Update device_control
-            // Requirement: Use action.deviceId for the command, NOT the top-level sensor deviceId
             const actuatorDeviceId = flow.action.deviceId || flow.deviceId;
             const control = (await controlCol.findOne({ _id: actuatorDeviceId })) || {};
             const actuators = control.actuators || {};
             const actuatorKey = flow.action.actuatorKey;
 
             if (!actuators[actuatorKey]) {
-                console.log(`[AUTOMATION] Actuator '${actuatorKey}' not found on device ${flow.deviceId}`);
+                console.log(`[AUTOMATION] Actuator '${actuatorKey}' not found on device ${actuatorDeviceId}`);
                 await logsCol.insertOne({
                     flowId: new ObjectId(flowId),
                     ts: now,
@@ -132,40 +131,67 @@ function defineFlowJobs(agenda) {
                 return;
             }
 
+            const actuatorObj = actuators[actuatorKey];
+
             // Check if in auto mode
-            // Following src/scheduler/jobs.js: actuators[actuatorName].default?.auto !== true
-            if (actuators[actuatorKey].default?.auto !== true) {
-                console.log(`[AUTOMATION] Actuator '${actuatorKey}' skipped (manual mode) for device ${flow.deviceId}`);
+            if (actuatorObj.default?.auto !== true && actuatorObj.auto !== true) {
+                console.log(`[AUTOMATION] Actuator '${actuatorKey}' skipped (manual mode) for device ${actuatorDeviceId}`);
                 await logsCol.insertOne({
                     flowId: new ObjectId(flowId),
                     ts: now,
                     status: "skipped",
                     reason: "manual mode",
-                    currentValue,
-                    previousValue: lastValue,
-                    delta
+                    currentValue
                 });
-                // Update lastValue anyway so we don't trigger immediately when switched to auto
-                await flowStateCol.updateOne(
-                    { flowId: new ObjectId(flowId) },
-                    { $set: { lastValue: currentValue, lastValueTs: now } }
-                );
                 return;
             }
 
-            // Apply action: Standardized on setValue
-            const updateKey = `actuators.${actuatorKey}.value`;
+            // --- SMART VALUE MAPPING ---
+            // If the device uses "ON"/"OFF" but flow sends true/false, we map it automatically.
+            const flowVal = flow.action.setValue;
+
+            // Build $set object dynamically based on what keys the device actually uses
+            const $set = {};
+
+            // 1. Check for 'state' (Commonly used for relay status)
+            if (actuatorObj.hasOwnProperty('state')) {
+                let mappedVal = flowVal;
+                if (typeof actuatorObj.state === 'string') {
+                    const currentUpper = actuatorObj.state.toUpperCase();
+                    if (currentUpper === 'ON' || currentUpper === 'OFF') {
+                        mappedVal = flowVal ? 'ON' : 'OFF';
+                    }
+                }
+                $set[`actuators.${actuatorKey}.state`] = mappedVal;
+            }
+
+            // 2. Check for 'status' (Alternative naming)
+            if (actuatorObj.hasOwnProperty('status')) {
+                let mappedVal = flowVal;
+                if (typeof actuatorObj.status === 'string') {
+                    const currentUpper = actuatorObj.status.toUpperCase();
+                    if (currentUpper === 'ON' || currentUpper === 'OFF') {
+                        mappedVal = flowVal ? 'ON' : 'OFF';
+                    }
+                }
+                $set[`actuators.${actuatorKey}.status`] = mappedVal;
+            }
+
+            // 3. Always update 'value' as well (Standard key)
+            $set[`actuators.${actuatorKey}.value`] = flowVal;
+
+            // Apply updates to DB
             await controlCol.updateOne(
                 { _id: actuatorDeviceId },
-                { $set: { [updateKey]: flow.action.setValue } },
+                { $set },
                 { upsert: true }
             );
 
-            // Fetch the full updated doc and publish to MQTT
+            // Fetch latest and publish
             const controlDoc = await controlCol.findOne({ _id: actuatorDeviceId });
             publishControl(actuatorDeviceId, controlDoc);
 
-            console.log(`✅ [AUTOMATION] Flow ${flow.name} triggered. Set ${actuatorKey} to ${flow.action.setValue} on device ${actuatorDeviceId}`);
+            console.log(`🚀 [AUTOMATION] Flow "${flow.name}" logic met (${currentValue} ${flow.condition?.operator} ${flow.condition?.value}). Command sent to ${actuatorDeviceId}.`);
 
             // 9) Update flow state
             await flowStateCol.updateOne(
