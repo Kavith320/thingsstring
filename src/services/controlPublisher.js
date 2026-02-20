@@ -8,15 +8,21 @@ const { getMqttClient } = require("../mqtt/client");
 
 
 function publishControl(deviceId, controlDoc) {
+  if (!controlDoc) return;
+
   const client = getMqttClient();
   const topic = `ts/${deviceId}/control`;
 
-  // exact copy of device_control doc
-  const payload = JSON.stringify(controlDoc);
+  // Strip MongoDB internal fields like _id to keep payload clean for devices
+  const { _id, ...cleanDoc } = controlDoc;
+  const payload = JSON.stringify(cleanDoc);
 
   client.publish(topic, payload, { qos: 1, retain: true }, (err) => {
-    if (err) console.error(`❌ MQTT publish error (${topic}):`, err.message);
-    else console.log(`📤 Published control -> ${topic}`);
+    if (err) {
+      console.error(`❌ MQTT [${deviceId}] publish error:`, err.message);
+    } else {
+      console.log(`📤 [${deviceId}] Published control state to MQTT`);
+    }
   });
 }
 

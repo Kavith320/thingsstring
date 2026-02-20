@@ -126,7 +126,7 @@ async function getDeviceTelemetry(req, res) {
     return res.status(500).json({ ok: false, error: e.message });
   }
 }
-const { getMqttClient } = require("../mqtt/client");
+const { publishControl } = require("../services/controlPublisher");
 
 async function updateDeviceControl(req, res) {
   try {
@@ -187,21 +187,14 @@ async function updateDeviceControl(req, res) {
 
     // 4) read latest control doc and publish to MQTT
     const controlDoc = await controlCol.findOne({ _id: deviceId });
-
-    // Publish: ts/<deviceId>/control (retain so device gets it after reconnect)
-    const client = getMqttClient();
-    client.publish(
-      `ts/${deviceId}/control`,
-      JSON.stringify(controlDoc),
-      { qos: 1, retain: true }
-    );
+    publishControl(deviceId, controlDoc);
 
     return res.json({ ok: true, deviceId, control: controlDoc });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
 }
-    
+
 
 module.exports = {
   listMyDevices,
