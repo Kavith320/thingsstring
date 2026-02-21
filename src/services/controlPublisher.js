@@ -21,7 +21,7 @@ function publishControl(deviceId, controlDoc) {
     if (err) {
       console.error(`❌ MQTT [${deviceId}] publish error:`, err.message);
     } else {
-      console.log(`📤 [${deviceId}] Published control state to MQTT (QoS: 0, Retain: true)`);
+      console.log(`📤 [${deviceId}] Published: ${payload}`);
     }
   });
 }
