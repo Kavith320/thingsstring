@@ -17,11 +17,11 @@ function publishControl(deviceId, controlDoc) {
   const { _id, ...cleanDoc } = controlDoc;
   const payload = JSON.stringify(cleanDoc);
 
-  client.publish(topic, payload, { qos: 1, retain: true }, (err) => {
+  client.publish(topic, payload, { qos: 0, retain: true }, (err) => {
     if (err) {
       console.error(`❌ MQTT [${deviceId}] publish error:`, err.message);
     } else {
-      console.log(`📤 [${deviceId}] Published control state to MQTT`);
+      console.log(`📤 [${deviceId}] Published control state to MQTT (QoS: 0, Retain: true)`);
     }
   });
 }

@@ -47,6 +47,7 @@ function startMqtt(customClientId = null) {
   // ✅ store globally so other modules can publish
   mqttClient = mqtt.connect(url, {
     clientId,
+    clean: true,
     reconnectPeriod: 2000,
     username: process.env.MQTT_USERNAME || undefined,
     password: process.env.MQTT_PASSWORD || undefined,

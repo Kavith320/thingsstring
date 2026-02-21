@@ -1,5 +1,6 @@
 const User = require("../models/User");
 const { getDb } = require("../db/mongo");
+const { publishControl } = require("../services/controlPublisher");
 const mongoose = require("mongoose");
 const { ObjectId } = mongoose.Types;
 
@@ -243,13 +244,7 @@ async function controlDevice(req, res) {
         await controlCol.updateOne({ _id: deviceId }, { $set }, { upsert: true });
 
         const controlDoc = await controlCol.findOne({ _id: deviceId });
-
-        const client = getMqttClient();
-        client.publish(
-            `ts/${deviceId}/control`,
-            JSON.stringify(controlDoc),
-            { qos: 1, retain: true }
-        );
+        publishControl(deviceId, controlDoc);
 
         return res.json({ ok: true, control: controlDoc });
     } catch (e) {
