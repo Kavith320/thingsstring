@@ -147,37 +147,41 @@ function defineFlowJobs(agenda) {
             }
 
             // --- SMART VALUE MAPPING ---
-            // If the device uses "ON"/"OFF" but flow sends true/false, we map it automatically.
             const flowVal = flow.action.setValue;
-
-            // Build $set object dynamically based on what keys the device actually uses
             const $set = {};
 
-            // 1. Check for 'state' (Commonly used for relay status)
-            if (actuatorObj.hasOwnProperty('state')) {
+            // Determine if the device likely uses string states (ON/OFF)
+            // We check the top level OR the default object for clues
+            const hasStateKey = actuatorObj.hasOwnProperty('state');
+            const hasStatusKey = actuatorObj.hasOwnProperty('status');
+            const defaultState = actuatorObj.default?.state;
+            const defaultStatus = actuatorObj.default?.status;
+
+            const isStringState = (typeof actuatorObj.state === 'string') ||
+                (typeof defaultState === 'string');
+            const isStringStatus = (typeof actuatorObj.status === 'string') ||
+                (typeof defaultStatus === 'string');
+
+            // 1. Handle 'state'
+            if (hasStateKey || defaultState !== undefined || isStringState) {
                 let mappedVal = flowVal;
-                if (typeof actuatorObj.state === 'string') {
-                    const currentUpper = actuatorObj.state.toUpperCase();
-                    if (currentUpper === 'ON' || currentUpper === 'OFF') {
-                        mappedVal = flowVal ? 'ON' : 'OFF';
-                    }
+                // If it looks like it wants ON/OFF, give it ON/OFF
+                if (isStringState || (defaultState && (defaultState === 'ON' || defaultState === 'OFF'))) {
+                    mappedVal = flowVal ? 'ON' : 'OFF';
                 }
                 $set[`actuators.${actuatorKey}.state`] = mappedVal;
             }
 
-            // 2. Check for 'status' (Alternative naming)
-            if (actuatorObj.hasOwnProperty('status')) {
+            // 2. Handle 'status'
+            if (hasStatusKey || defaultStatus !== undefined || isStringStatus) {
                 let mappedVal = flowVal;
-                if (typeof actuatorObj.status === 'string') {
-                    const currentUpper = actuatorObj.status.toUpperCase();
-                    if (currentUpper === 'ON' || currentUpper === 'OFF') {
-                        mappedVal = flowVal ? 'ON' : 'OFF';
-                    }
+                if (isStringStatus || (defaultStatus && (defaultStatus === 'ON' || defaultStatus === 'OFF'))) {
+                    mappedVal = flowVal ? 'ON' : 'OFF';
                 }
                 $set[`actuators.${actuatorKey}.status`] = mappedVal;
             }
 
-            // 3. Always update 'value' as well (Standard key)
+            // 3. Always update 'value' as well
             $set[`actuators.${actuatorKey}.value`] = flowVal;
 
             // Apply updates to DB
