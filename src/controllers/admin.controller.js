@@ -304,6 +304,182 @@ async function getDeviceTelemetryHistory(req, res) {
     }
 }
 
+// GET /api/admin/health
+async function getSystemHealth(req, res) {
+    try {
+        const db = getDb();
+        const dbStats = await db.stats(1024 * 1024);
+
+        let mqttConnected = false;
+        try {
+            const client = getMqttClient();
+            mqttConnected = client && client.connected;
+        } catch {
+            mqttConnected = false;
+        }
+
+        const memory = process.memoryUsage();
+
+        return res.json({
+            ok: true,
+            health: {
+                status: "healthy",
+                uptimeSeconds: Math.floor(process.uptime()),
+                memory: {
+                    rssMB: Math.round(memory.rss / (1024 * 1024)),
+                    heapUsedMB: Math.round(memory.heapUsed / (1024 * 1024)),
+                    heapTotalMB: Math.round(memory.heapTotal / (1024 * 1024)),
+                },
+                mongo: {
+                    connected: true,
+                    dataSizeMB: dbStats.dataSize,
+                    storageSizeMB: dbStats.storageSize,
+                    collections: dbStats.collections,
+                    objectsCount: dbStats.objects,
+                },
+                mqtt: {
+                    connected: mqttConnected,
+                },
+            },
+        });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// PUT /api/admin/users/:userId/role
+async function updateUserRole(req, res) {
+    try {
+        const { userId } = req.params;
+        const { role } = req.body;
+
+        if (!["user", "admin"].includes(role)) {
+            return res.status(400).json({ ok: false, error: "Invalid role. Must be 'user' or 'admin'" });
+        }
+
+        const user = await User.findByIdAndUpdate(userId, { role }, { new: true }).select("-passwordHash");
+        if (!user) {
+            return res.status(404).json({ ok: false, error: "User not found" });
+        }
+
+        return res.json({ ok: true, message: `User role updated to '${role}'`, user });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// POST /api/admin/users/:userId/reset-password
+const bcrypt = require("bcrypt");
+async function resetUserPassword(req, res) {
+    try {
+        const { userId } = req.params;
+        const { newPassword } = req.body;
+
+        if (!newPassword || newPassword.length < 6) {
+            return res.status(400).json({ ok: false, error: "Password must be at least 6 characters" });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(newPassword, salt);
+
+        const user = await User.findByIdAndUpdate(userId, { passwordHash }, { new: true }).select("-passwordHash");
+        if (!user) {
+            return res.status(404).json({ ok: false, error: "User not found" });
+        }
+
+        return res.json({ ok: true, message: "User password reset successfully" });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// POST /api/admin/devices/:deviceId/lockout
+async function toggleDeviceLockout(req, res) {
+    try {
+        const { deviceId } = req.params;
+        const { disabled, reason } = req.body;
+
+        const db = getDb();
+        const configCol = db.collection("device_config");
+
+        const device = await configCol.findOne({ _id: deviceId });
+        if (!device) {
+            return res.status(404).json({ ok: false, error: "Device not found" });
+        }
+
+        const isDisabled = disabled !== undefined ? Boolean(disabled) : !device.isDisabled;
+
+        await configCol.updateOne(
+            { _id: deviceId },
+            {
+                $set: {
+                    isDisabled,
+                    disabledReason: reason || (isDisabled ? "Admin Lockout" : null),
+                    disabledAt: isDisabled ? new Date() : null,
+                },
+            }
+        );
+
+        return res.json({
+            ok: true,
+            message: `Device ${deviceId} has been ${isDisabled ? "LOCKED OUT" : "UNLOCKED"}`,
+            deviceId,
+            isDisabled,
+        });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// POST /api/admin/broadcast/control
+async function broadcastDeviceControl(req, res) {
+    try {
+        const { actuators, filter = {} } = req.body;
+        if (!actuators || typeof actuators !== "object") {
+            return res.status(400).json({ ok: false, error: "Body must include 'actuators' object" });
+        }
+
+        const db = getDb();
+        const configCol = db.collection("device_config");
+        const controlCol = db.collection("device_control");
+
+        // Find target devices matching filter
+        const devices = await configCol.find(filter).toArray();
+        if (devices.length === 0) {
+            return res.json({ ok: true, message: "No matching devices found for broadcast", affectedCount: 0 });
+        }
+
+        let affectedCount = 0;
+        for (const dev of devices) {
+            const deviceId = dev._id;
+            const $set = {};
+
+            for (const [actName, actPatch] of Object.entries(actuators)) {
+                if (dev.actuators && dev.actuators[actName]) {
+                    for (const [k, v] of Object.entries(actPatch)) {
+                        $set[`actuators.${actName}.${k}`] = v;
+                    }
+                }
+            }
+
+            if (Object.keys($set).length > 0) {
+                await controlCol.updateOne({ _id: deviceId }, { $set }, { upsert: true });
+                const controlDoc = await controlCol.findOne({ _id: deviceId });
+                publishControl(deviceId, controlDoc);
+                affectedCount++;
+            }
+        }
+
+        return res.json({
+            ok: true,
+            message: `Broadcast control command sent to ${affectedCount} devices`,
+            affectedCount,
+        });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
 module.exports = {
     getSystemStats,
     getAllUsers,
@@ -315,4 +491,9 @@ module.exports = {
     getDeviceDetails,
     controlDevice,
     getDeviceTelemetryHistory,
+    getSystemHealth,
+    updateUserRole,
+    resetUserPassword,
+    toggleDeviceLockout,
+    broadcastDeviceControl,
 };

@@ -202,7 +202,71 @@ Deletes a schedule by its ID.
 }
 ```
 
-## usage
+## 5. System Health & Infrastructure Diagnostics
+
+### Get System Health
+`GET /api/admin/health`
+
+Returns process memory, Node.js uptime, MongoDB stats, and MQTT connection status.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "health": {
+    "status": "healthy",
+    "uptimeSeconds": 86400,
+    "memory": { "rssMB": 65, "heapUsedMB": 42, "heapTotalMB": 80 },
+    "mongo": { "connected": true, "dataSizeMB": 12, "storageSizeMB": 20, "collections": 11, "objectsCount": 1450 },
+    "mqtt": { "connected": true }
+  }
+}
+```
+
+## 6. Advanced User Management & Access Control
+
+### Update User Role
+`PUT /api/admin/users/:userId/role`
+
+**Body:**
+```json
+{ "role": "admin" } // or "user"
+```
+
+### Force Reset User Password
+`POST /api/admin/users/:userId/reset-password`
+
+**Body:**
+```json
+{ "newPassword": "newSecurePassword123" }
+```
+
+## 7. Emergency & Mass Control Features
+
+### Device Lockout / Unlock
+`POST /api/admin/devices/:deviceId/lockout`
+
+Locks or unlocks a device (prevents non-admin interactions on malfunctioning devices).
+
+**Body:**
+```json
+{ "disabled": true, "reason": "High power consumption spike detected" }
+```
+
+### Broadcast Emergency Mass Control
+`POST /api/admin/broadcast/control`
+
+Sends a control command to ALL devices (or a filtered group of devices) simultaneously over MQTT.
+
+**Body:**
+```json
+{
+  "actuators": { "light": { "status": false }, "main_relay": { "status": false } },
+  "filter": {} // optional MongoDB filter query
+}
+```
+
+## Usage
 
 To create the first admin user, run:
 ```bash
