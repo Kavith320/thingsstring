@@ -116,6 +116,7 @@ function startMqtt(customClientId = null) {
         // insert each telemetry message as a new doc (history)
         await telCol.insertOne({
           deviceId,
+          createdAt: new Date(),
           ...payload, // raw telemetry fields
         });
 
