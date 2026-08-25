@@ -8,7 +8,8 @@
     "start": "node src/server.js",
     "worker": "nodemon src/scheduler/worker.js",
     "automation-worker": "nodemon src/automation/worker.js",
-    "backup-telemetry": "node scripts/backup_and_cleanup_telemetry.js"
+    "backup-telemetry": "node scripts/backup_and_cleanup_telemetry.js",
+    "backup-db": "node scripts/backup_full_db.js"
   },
   "keywords": [],
   "author": "",
