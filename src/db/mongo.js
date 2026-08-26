@@ -10,10 +10,16 @@ async function connectMongo(retries = 5, delayMs = 3000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       await mongoose.connect(uri, {
-        serverSelectionTimeoutMS: 10000, // 10s to find a server
-        connectTimeoutMS: 10000,
+        serverSelectionTimeoutMS: 15000,
+        connectTimeoutMS: 15000,
         socketTimeoutMS: 45000,
-        family: 4, // Force IPv4 — avoids ESERVFAIL on many Linux servers
+        maxIdleTimeMS: 30000, // Close idle connections after 30s to prevent ECONNRESET by network firewalls
+        maxPoolSize: 10,
+        minPoolSize: 2,
+        heartbeatFrequencyMS: 10000, // Ping MongoDB every 10s to keep connection alive
+        retryWrites: true,
+        retryReads: true,
+        family: 4, // Force IPv4 — avoids ESERVFAIL / EREFUSED on Linux servers
       });
       db = mongoose.connection.db;
       console.log("✅ MongoDB connected");

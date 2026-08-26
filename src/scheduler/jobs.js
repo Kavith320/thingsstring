@@ -9,6 +9,27 @@ const { getDb } = require("../db/mongo");
 async function applyActions(deviceId, actions) {
   const db = getDb();
   const controlCol = db.collection("device_control");
+  const telemetryCol = db.collection("device_telemetry");
+
+  // Check if device is OFFLINE (telemetry recency threshold: default 5 minutes / 300 seconds)
+  const lastTelemetry = await telemetryCol.findOne(
+    { deviceId },
+    { sort: { _id: -1 } }
+  );
+
+  if (lastTelemetry) {
+    const telemetryTime = lastTelemetry.createdAt
+      ? new Date(lastTelemetry.createdAt).getTime()
+      : (lastTelemetry._id?.getTimestamp ? lastTelemetry._id.getTimestamp().getTime() : 0);
+
+    const maxAgeSec = parseInt(process.env.DEVICE_OFFLINE_THRESHOLD_SEC || "300", 10);
+    const ageSec = Math.floor((Date.now() - telemetryTime) / 1000);
+
+    if (ageSec > maxAgeSec) {
+      console.log(`⏭️ [SCHEDULER] Device ${deviceId} is OFFLINE (last telemetry was ${ageSec}s ago). Skipping schedule actions.`);
+      return;
+    }
+  }
 
   const control = (await controlCol.findOne({ _id: deviceId })) || {};
   const actuators = control.actuators || {};
@@ -78,6 +99,19 @@ function defineJobs(agenda) {
 
     await applyActions(deviceId, end_actions);
   });
+
+  // 📦 WEEKLY BACKUP & TELEMETRY CLEANUP
+  agenda.define("weekly-backup-and-cleanup", async () => {
+    console.log(`📦 [SCHEDULER] Starting scheduled weekly backup & telemetry cleanup at ${new Date().toISOString()}...`);
+    const { backupAndCleanupTelemetry } = require("../../scripts/backup_and_cleanup_telemetry");
+    try {
+      await backupAndCleanupTelemetry(7);
+      console.log(`✅ [SCHEDULER] Weekly backup & telemetry cleanup finished successfully.`);
+    } catch (err) {
+      console.error(`❌ [SCHEDULER] Weekly backup failed:`, err.message);
+    }
+  });
 }
 
 module.exports = { defineJobs };
+

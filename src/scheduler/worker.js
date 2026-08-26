@@ -16,7 +16,12 @@ async function startWorker() {
 
   defineJobs(agenda);
 
+  await agenda.ready();
   await agenda.start();
+
+  // 📦 Schedule weekly DB backup & telemetry cleanup (Every Sunday at 2:00 AM)
+  await agenda.every("0 2 * * 0", "weekly-backup-and-cleanup");
+  console.log("📅 Scheduled automatic weekly backup (Every Sunday at 02:00 AM)");
 
   // ✅ less aggressive than 1s (recommended)
   await startScheduleSync(agenda, { intervalMs: 5000 });

@@ -10,20 +10,29 @@ const { getMqttClient } = require("../mqtt/client");
 function publishControl(deviceId, controlDoc) {
   if (!controlDoc) return;
 
-  const client = getMqttClient();
-  const topic = `ts/${deviceId}/control`;
-
-  // Strip MongoDB internal fields like _id to keep payload clean for devices
-  const { _id, ...cleanDoc } = controlDoc;
-  const payload = JSON.stringify(cleanDoc);
-
-  client.publish(topic, payload, { qos: 0, retain: true }, (err) => {
-    if (err) {
-      console.error(`❌ MQTT [${deviceId}] publish error:`, err.message);
-    } else {
-      console.log(`📤 [${deviceId}] Published: ${payload}`);
+  try {
+    const client = getMqttClient();
+    if (!client || !client.connected) {
+      console.log(`⚠️ MQTT client offline — skipping live publish for device ${deviceId} (reconnect auto-recovers)`);
+      return;
     }
-  });
+
+    const topic = `ts/${deviceId}/control`;
+
+    // Strip MongoDB internal fields like _id to keep payload clean for devices
+    const { _id, ...cleanDoc } = controlDoc;
+    const payload = JSON.stringify(cleanDoc);
+
+    client.publish(topic, payload, { qos: 0, retain: true }, (err) => {
+      if (err) {
+        console.error(`❌ MQTT [${deviceId}] publish error:`, err.message);
+      } else {
+        console.log(`📤 [${deviceId}] Published: ${payload}`);
+      }
+    });
+  } catch (err) {
+    console.error(`❌ [${deviceId}] publishControl error:`, err.message);
+  }
 }
 
 async function publishAllControlsOnce() {
@@ -40,25 +49,33 @@ async function publishAllControlsOnce() {
 /**
  * Watches changes in device_control collection and publishes updates
  * - change streams require MongoDB replica set (Atlas OK)
+ * - auto-restarts watcher stream on transient network errors
  */
 async function watchControlChanges() {
   const db = getDb();
   const col = db.collection("device_control");
 
-  const stream = col.watch([], { fullDocument: "updateLookup" });
+  function startStream() {
+    try {
+      const stream = col.watch([], { fullDocument: "updateLookup" });
 
-  stream.on("change", (change) => {
-    const doc = change.fullDocument;
-    if (!doc || !doc._id) return;
+      stream.on("change", (change) => {
+        const doc = change.fullDocument;
+        if (!doc || !doc._id) return;
+        publishControl(doc._id, doc);
+      });
 
-    publishControl(doc._id, doc);
-  });
+      stream.on("error", (err) => {
+        console.error("⚠️ device_control change stream error (re-subscribing in 5s):", err.message);
+        setTimeout(startStream, 5000);
+      });
+    } catch (err) {
+      console.error("⚠️ Failed to open device_control change stream (retrying in 5s):", err.message);
+      setTimeout(startStream, 5000);
+    }
+  }
 
-  stream.on("error", (err) => {
-    console.error("❌ device_control change stream error:", err.message);
-    // Keep it simple: let pm2/systemd restart the process if needed.
-  });
-
+  startStream();
   console.log("👀 Watching device_control changes...");
 }
 

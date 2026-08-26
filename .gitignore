@@ -9,4 +9,7 @@ coverage
 dist
 build
 *.log
+backups
+backups/
+
 

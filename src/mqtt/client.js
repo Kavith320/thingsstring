@@ -48,7 +48,10 @@ function startMqtt(customClientId = null) {
   mqttClient = mqtt.connect(url, {
     clientId,
     clean: true,
+    keepalive: 30, // Send MQTT PINGREQ every 30s to prevent HiveMQ / firewall ECONNRESET drops
+    connectTimeout: 10000,
     reconnectPeriod: 2000,
+    resubscribe: true,
     username: process.env.MQTT_USERNAME || undefined,
     password: process.env.MQTT_PASSWORD || undefined,
   });
@@ -128,9 +131,15 @@ function startMqtt(customClientId = null) {
   });
 
   mqttClient.on("reconnect", () => console.log("🔁 MQTT reconnecting..."));
-  mqttClient.on("close", () => console.log("⚠️ MQTT closed"));
+  mqttClient.on("close", () => console.log("⚠️ MQTT connection closed"));
   mqttClient.on("offline", () => console.log("⚠️ MQTT offline"));
-  mqttClient.on("error", (err) => console.error("❌ MQTT error:", err.message));
+  mqttClient.on("error", (err) => {
+    if (err.message && (err.message.includes("ECONNRESET") || err.code === "ECONNRESET")) {
+      console.log("⚠️ MQTT network socket reset (reconnecting automatically...)");
+    } else {
+      console.error("❌ MQTT error:", err.message);
+    }
+  });
 
   return mqttClient;
 }
