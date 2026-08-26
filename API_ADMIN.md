@@ -233,6 +233,25 @@ Returns process memory, Node.js uptime, MongoDB stats, and MQTT connection statu
 { "role": "admin" } // or "user"
 ```
 
+### Set User Status (Account Suspension)
+`PUT /api/admin/users/:userId/status`
+
+Blocks or re-enables a user account without deleting historical data.
+
+**Body:**
+```json
+{ "status": "disabled" } // or "active"
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "message": "User status set to disabled",
+  "user": { "id": "...", "email": "user@example.com", "status": "disabled" }
+}
+```
+
 ### Force Reset User Password
 `POST /api/admin/users/:userId/reset-password`
 
@@ -241,7 +260,78 @@ Returns process memory, Node.js uptime, MongoDB stats, and MQTT connection statu
 { "newPassword": "newSecurePassword123" }
 ```
 
-## 7. Emergency & Mass Control Features
+## 7. Device Transfer & Ownership Management
+
+### Transfer Device Ownership
+`PUT /api/admin/devices/:deviceId/transfer`
+
+Reassigns a device from its current owner to another registered user (by `_id` or `userId8`).
+
+**Body:**
+```json
+{ "targetUserId": "8_char_userId8_or_mongo_id" }
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "message": "Device device_123 transferred to user newowner@example.com",
+  "deviceId": "device_123",
+  "newOwner": { "id": "...", "email": "newowner@example.com" }
+}
+```
+
+## 8. Automation Flow Oversight & Management
+
+### List All Automation Flows
+`GET /api/admin/automation/flows`
+
+Returns all automation rules across all users, enriched with owner details.
+
+### Toggle Automation Flow Status
+`PUT /api/admin/automation/flows/:flowId/toggle`
+
+**Body:**
+```json
+{ "enabled": false }
+```
+
+### Delete Automation Flow
+`DELETE /api/admin/automation/flows/:flowId`
+
+Admin force-delete of any user's automation flow.
+
+### Global Automation Execution Logs
+`GET /api/admin/automation/logs?status=RAN&limit=100`
+
+Query parameters: `flowId`, `deviceId`, `status` (`RAN` / `SKIPPED`), `limit` (default 100).
+
+## 9. On-Demand Maintenance & System Operations
+
+### Trigger On-Demand Database Backup
+`POST /api/admin/maintenance/backup`
+
+Executes full MongoDB database dump backup.
+
+### Trigger On-Demand Telemetry Cleanup
+`POST /api/admin/maintenance/clean-telemetry`
+
+**Body:**
+```json
+{ "daysToKeep": 7 }
+```
+
+## 10. Audit Logging System
+
+### Get Admin Audit Logs
+`GET /api/admin/audit-logs?limit=100`
+
+Query parameters: `action`, `adminEmail`, `targetId`, `limit`. Returns full history of administrative operations.
+
+---
+
+## 11. Emergency & Mass Control Features
 
 ### Device Lockout / Unlock
 `POST /api/admin/devices/:deviceId/lockout`
@@ -276,3 +366,4 @@ Example:
 ```bash
 node scripts/create-admin.js admin@thingsstring.com supersecret
 ```
+

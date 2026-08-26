@@ -1,7 +1,8 @@
 // src/middleware/auth.middleware.js
 const { verifyToken } = require("../utils/jwt");
+const User = require("../models/User");
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
   const [type, token] = header.split(" ");
 
@@ -11,11 +12,21 @@ function requireAuth(req, res, next) {
 
   try {
     const decoded = verifyToken(token);
+
+    const user = await User.findById(decoded.sub).select("role isActive status email userId8");
+    if (!user) {
+      return res.status(401).json({ ok: false, error: "User account no longer exists" });
+    }
+
+    if (user.isActive === false || user.status === "disabled") {
+      return res.status(403).json({ ok: false, error: "User account is suspended" });
+    }
+
     req.user = {
-      id: decoded.sub,
-      email: decoded.email,
-      role: decoded.role,
-      userId8: decoded.userId8,
+      id: String(user._id),
+      email: user.email,
+      role: user.role,
+      userId8: user.userId8,
     };
     return next();
   } catch (e) {

@@ -1,6 +1,9 @@
 const User = require("../models/User");
 const { getDb } = require("../db/mongo");
 const { publishControl } = require("../services/controlPublisher");
+const { logAdminAction } = require("../services/auditLogger");
+const { backupFullDatabase } = require("../../scripts/backup_full_db");
+const { backupAndCleanupTelemetry } = require("../../scripts/backup_and_cleanup_telemetry");
 const mongoose = require("mongoose");
 const { ObjectId } = mongoose.Types;
 
@@ -480,6 +483,274 @@ async function broadcastDeviceControl(req, res) {
     }
 }
 
+// PUT /api/admin/users/:userId/status
+async function setUserStatus(req, res) {
+    try {
+        const { userId } = req.params;
+        const { status } = req.body; // "active" or "disabled"
+
+        if (!["active", "disabled"].includes(status)) {
+            return res.status(400).json({ ok: false, error: "Status must be 'active' or 'disabled'" });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ ok: false, error: "User not found" });
+        }
+
+        user.status = status;
+        user.isActive = (status === "active");
+        await user.save();
+
+        await logAdminAction({
+            adminId: req.user.id,
+            adminEmail: req.user.email,
+            action: "USER_STATUS_UPDATE",
+            targetId: userId,
+            details: { newStatus: status, userEmail: user.email },
+            req,
+        });
+
+        return res.json({ ok: true, message: `User status set to ${status}`, user: { id: user._id, email: user.email, status: user.status } });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// PUT /api/admin/devices/:deviceId/transfer
+async function transferDeviceOwnership(req, res) {
+    try {
+        const { deviceId } = req.params;
+        const { targetUserId } = req.body;
+
+        if (!targetUserId) {
+            return res.status(400).json({ ok: false, error: "Missing required parameter 'targetUserId'" });
+        }
+
+        // Find target user (by MongoDB _id or userId8)
+        let targetUser = await User.findById(targetUserId).catch(() => null);
+        if (!targetUser) {
+            targetUser = await User.findOne({ userId8: targetUserId });
+        }
+
+        if (!targetUser) {
+            return res.status(404).json({ ok: false, error: "Target user not found" });
+        }
+
+        const db = getDb();
+        const configCol = db.collection("device_config");
+
+        const device = await configCol.findOne({ _id: deviceId });
+        if (!device) {
+            return res.status(404).json({ ok: false, error: "Device not found" });
+        }
+
+        const previousOwnerId = device.device?.user_id || null;
+
+        await configCol.updateOne(
+            { _id: deviceId },
+            { $set: { "device.user_id": String(targetUser._id), updatedAt: new Date() } }
+        );
+
+        await logAdminAction({
+            adminId: req.user.id,
+            adminEmail: req.user.email,
+            action: "DEVICE_TRANSFER",
+            targetId: deviceId,
+            details: { previousOwnerId, newOwnerId: String(targetUser._id), newOwnerEmail: targetUser.email },
+            req,
+        });
+
+        return res.json({
+            ok: true,
+            message: `Device ${deviceId} transferred to user ${targetUser.email}`,
+            deviceId,
+            newOwner: { id: targetUser._id, email: targetUser.email },
+        });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// GET /api/admin/automation/flows
+async function getAllAutomationFlows(req, res) {
+    try {
+        const db = getDb();
+        const flowsCol = db.collection("automation_flows");
+        const flows = await flowsCol.find({}).toArray();
+
+        // Populate user details for each flow owner
+        const userIds = [...new Set(flows.map(f => f.user_id).filter(Boolean))];
+        const users = await User.find({ _id: { $in: userIds } }, "name email");
+        const userMap = {};
+        users.forEach(u => { userMap[String(u._id)] = { name: u.name, email: u.email }; });
+
+        const enrichedFlows = flows.map(f => ({
+            ...f,
+            owner: userMap[String(f.user_id)] || { name: "Unknown", email: "N/A" }
+        }));
+
+        return res.json({ ok: true, count: enrichedFlows.length, flows: enrichedFlows });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// PUT /api/admin/automation/flows/:flowId/toggle
+async function toggleAutomationFlow(req, res) {
+    try {
+        const { flowId } = req.params;
+        const { enabled } = req.body;
+
+        const db = getDb();
+        const flowsCol = db.collection("automation_flows");
+
+        let filter = { _id: flowId };
+        if (ObjectId.isValid(flowId)) {
+            filter = { $or: [{ _id: flowId }, { _id: new ObjectId(flowId) }] };
+        }
+
+        const flow = await flowsCol.findOne(filter);
+        if (!flow) {
+            return res.status(404).json({ ok: false, error: "Automation flow not found" });
+        }
+
+        const newEnabled = enabled !== undefined ? Boolean(enabled) : !flow.enabled;
+        await flowsCol.updateOne(filter, { $set: { enabled: newEnabled, updatedAt: new Date() } });
+
+        await logAdminAction({
+            adminId: req.user.id,
+            adminEmail: req.user.email,
+            action: "AUTOMATION_FLOW_TOGGLE",
+            targetId: String(flow._id),
+            details: { enabled: newEnabled, flowName: flow.name },
+            req,
+        });
+
+        return res.json({ ok: true, message: `Flow ${flow.name} ${newEnabled ? "ENABLED" : "DISABLED"}`, enabled: newEnabled });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// DELETE /api/admin/automation/flows/:flowId
+async function deleteAutomationFlow(req, res) {
+    try {
+        const { flowId } = req.params;
+        const db = getDb();
+        const flowsCol = db.collection("automation_flows");
+
+        let filter = { _id: flowId };
+        if (ObjectId.isValid(flowId)) {
+            filter = { $or: [{ _id: flowId }, { _id: new ObjectId(flowId) }] };
+        }
+
+        const flow = await flowsCol.findOne(filter);
+        if (!flow) {
+            return res.status(404).json({ ok: false, error: "Automation flow not found" });
+        }
+
+        await flowsCol.deleteOne(filter);
+
+        await logAdminAction({
+            adminId: req.user.id,
+            adminEmail: req.user.email,
+            action: "AUTOMATION_FLOW_DELETE",
+            targetId: String(flow._id),
+            details: { flowName: flow.name, deviceId: flow.deviceId },
+            req,
+        });
+
+        return res.json({ ok: true, message: `Automation flow '${flow.name}' deleted successfully` });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// GET /api/admin/automation/logs
+async function getGlobalAutomationLogs(req, res) {
+    try {
+        const { flowId, deviceId, status, limit = 100 } = req.query;
+        const query = {};
+
+        if (flowId) query.flowId = flowId;
+        if (deviceId) query.deviceId = deviceId;
+        if (status) query.status = status.toUpperCase();
+
+        const db = getDb();
+        const logsCol = db.collection("automation_flow_logs");
+
+        const parsedLimit = Math.min(parseInt(limit, 10) || 100, 1000);
+        const logs = await logsCol.find(query).sort({ timestamp: -1 }).limit(parsedLimit).toArray();
+
+        return res.json({ ok: true, count: logs.length, logs });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// POST /api/admin/maintenance/backup
+async function triggerDatabaseBackup(req, res) {
+    try {
+        const backupDir = await backupFullDatabase();
+        await logAdminAction({
+            adminId: req.user.id,
+            adminEmail: req.user.email,
+            action: "MAINTENANCE_BACKUP",
+            targetId: null,
+            details: { backupDir },
+            req,
+        });
+
+        return res.json({ ok: true, message: "On-demand full database backup completed", backupDir });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// POST /api/admin/maintenance/clean-telemetry
+async function triggerTelemetryCleanup(req, res) {
+    try {
+        const daysToKeep = parseInt(req.body.daysToKeep, 10) || 7;
+        await backupAndCleanupTelemetry(daysToKeep);
+
+        await logAdminAction({
+            adminId: req.user.id,
+            adminEmail: req.user.email,
+            action: "MAINTENANCE_TELEMETRY_CLEANUP",
+            targetId: null,
+            details: { daysToKeep },
+            req,
+        });
+
+        return res.json({ ok: true, message: `Telemetry cleanup triggered (retained ${daysToKeep} days)` });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
+// GET /api/admin/audit-logs
+async function getAuditLogs(req, res) {
+    try {
+        const { action, adminEmail, targetId, limit = 100 } = req.query;
+        const query = {};
+
+        if (action) query.action = action;
+        if (adminEmail) query.adminEmail = adminEmail;
+        if (targetId) query.targetId = targetId;
+
+        const db = getDb();
+        const auditCol = db.collection("admin_audit_logs");
+
+        const parsedLimit = Math.min(parseInt(limit, 10) || 100, 1000);
+        const logs = await auditCol.find(query).sort({ timestamp: -1 }).limit(parsedLimit).toArray();
+
+        return res.json({ ok: true, count: logs.length, logs });
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: e.message });
+    }
+}
+
 module.exports = {
     getSystemStats,
     getAllUsers,
@@ -496,4 +767,14 @@ module.exports = {
     resetUserPassword,
     toggleDeviceLockout,
     broadcastDeviceControl,
+    setUserStatus,
+    transferDeviceOwnership,
+    getAllAutomationFlows,
+    toggleAutomationFlow,
+    deleteAutomationFlow,
+    getGlobalAutomationLogs,
+    triggerDatabaseBackup,
+    triggerTelemetryCleanup,
+    getAuditLogs,
 };
+
