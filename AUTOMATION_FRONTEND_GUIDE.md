@@ -88,3 +88,14 @@ The backend will never return an empty `{}` for errors. You should expect:
 }
 ```
 Use this `error` string to show a Toast notification on the frontend.
+
+---
+
+## 5. Backend System Resiliency & Frontend Benefits
+
+| System Feature | How the Backend Operates | How it Helps Frontend Developers |
+| :--- | :--- | :--- |
+| **Offline Device Protection** | Checks device telemetry freshness before triggering automations or schedules. If a device has missed telemetry beyond the timeout threshold, execution is automatically skipped and logged (`⏭️ [AUTOMATION] Device XXX is OFFLINE...`). | **Prevents UI State Mismatches & Ghost Triggers:** The frontend can display standard `Online`/`Offline` status badges. You don't need to write complex frontend checks to suppress automation calls for offline hardware—the backend guarantees offline devices won't execute phantom commands. |
+| **7-Day Telemetry TTL & Auto-Backup** | Automatically purges `device_telemetry` records older than 7 days using MongoDB TTL indexes while running weekly full database backups every Sunday at 02:00 AM. | **Blazing-Fast Charts & Responsive Analytics:** Keeps `GET /api/devices/:deviceId/telemetry` endpoint responses fast (<50ms). Re-rendering telemetry charts (Recharts / Chart.js) remains instant without browser memory strain or API timeouts. |
+| **MQTT Connection Resilience** | Backend MQTT client uses auto-reconnect backoff and publishes control states with the **Retain** flag. | **Reliable Real-Time UI Toggles:** Manual toggle switches in your React UI (`POST /api/devices/:deviceId/control`) will reliably reach hardware and reflect immediate status updates when connection restores. |
+

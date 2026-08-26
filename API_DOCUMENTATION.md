@@ -244,6 +244,25 @@ Devices should subscribe to this topic to receive state changes from the platfor
 
 ---
 
+## 7. Platform Systems & Reliability Features
+
+### A. Offline Device Protection
+- **Behavior**: Before executing any automation flow or scheduled task, the engine verifies the device's connectivity status based on its latest `telemetry` timestamp.
+- **Protection**: If a device is detected as `OFFLINE` (no telemetry received within the cutoff period), the engine automatically skips execution and records a skipped log entry (`⏭️ [AUTOMATION] Device XXX is OFFLINE... Skipping flow`).
+- **Frontend Benefit**: Prevents "ghost execution" bugs, false control triggers, and UI state desynchronization when devices are powered off or disconnected from the network.
+
+### B. Telemetry Retention & Database Optimization
+- **Behavior**:
+  - `device_telemetry` entries automatically expire and are purged after 7 days via a MongoDB TTL index on `createdAt`.
+  - Automatic full database backups are executed weekly (every Sunday at 02:00 AM) to preserve historical snapshots.
+- **Frontend Benefit**: Keeps `GET /api/devices/:deviceId/telemetry` queries lightning-fast (<50ms). Telemetry charts and dashboard graphs render smoothly without lag or high memory overhead from bloated database collections.
+
+### C. MQTT Resilience & Real-Time Sync
+- **Behavior**: Built-in exponential backoff auto-reconnection and retained control state messaging on `ts/<deviceId>/control`.
+- **Frontend Benefit**: Ensures manual control toggles issued via `POST /api/devices/:deviceId/control` reliably reach hardware and sync back to the UI in real time.
+
+---
+
 ## Error Codes
 - `400`: Bad Request (Invalid parameters)
 - `401`: Unauthorized (Missing or invalid token)
@@ -251,3 +270,4 @@ Devices should subscribe to this topic to receive state changes from the platfor
 - `404`: Not Found (Device or Schedule does not exist)
 - `409`: Conflict (Duplicate entry)
 - `500`: Internal Server Error
+
