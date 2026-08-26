@@ -16,7 +16,6 @@ async function startWorker() {
 
   defineJobs(agenda);
 
-  await agenda.ready();
   await agenda.start();
 
   // 📦 Schedule weekly DB backup & telemetry cleanup (Every Sunday at 2:00 AM)
