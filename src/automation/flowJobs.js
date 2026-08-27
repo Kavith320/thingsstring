@@ -21,6 +21,7 @@ function defineFlowJobs(agenda) {
         const db = getDb();
         const flowsCol = db.collection("automation_flows");
         const flowStateCol = db.collection("automation_flow_state");
+        const configCol = db.collection("device_config");
         const telemetryCol = db.collection("device_telemetry");
         const controlCol = db.collection("device_control");
         const logsCol = db.collection("automation_flow_logs");
@@ -160,6 +161,20 @@ function defineFlowJobs(agenda) {
                     });
                     return;
                 }
+            }
+
+            // Check if target actuator device is locked out by admin
+            const actuatorConfig = await configCol.findOne({ _id: actuatorDeviceId });
+            if (actuatorConfig && actuatorConfig.isDisabled) {
+                console.log(`🔒 [AUTOMATION] Device ${actuatorDeviceId} is locked out by admin. Skipping automation command.`);
+                await logsCol.insertOne({
+                    flowId: new ObjectId(flowId),
+                    ts: now,
+                    status: "skipped",
+                    reason: "device locked out by admin",
+                    actuatorDeviceId
+                });
+                return;
             }
 
             const control = (await controlCol.findOne({ _id: actuatorDeviceId })) || {};

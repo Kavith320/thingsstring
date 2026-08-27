@@ -154,6 +154,13 @@ async function updateDeviceControl(req, res) {
       return res.status(404).json({ ok: false, error: "Device not found" });
     }
 
+    if (config.isDisabled) {
+      return res.status(403).json({
+        ok: false,
+        error: `Device is locked out by admin. Reason: ${config.disabledReason || "Admin Lockout"}`,
+      });
+    }
+
     const configActuators = config.actuators || {};
 
     // 2) validate and build $set dynamically
