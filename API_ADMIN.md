@@ -351,9 +351,29 @@ Query parameters: `action`, `adminEmail`, `targetId`, `limit`. Returns full hist
 
 Locks or unlocks a device (prevents non-admin interactions on malfunctioning devices).
 
-**Body:**
+**Lockout Request Body:**
 ```json
 { "disabled": true, "reason": "High power consumption spike detected" }
+```
+
+**Unlock Request Body:**
+```json
+{ "disabled": false }
+```
+
+**Toggle Mode (Omitting `disabled` flips the current lockout state):**
+```json
+{}
+```
+
+**Response (Unlock):**
+```json
+{
+  "ok": true,
+  "message": "Device device_123 has been UNLOCKED",
+  "deviceId": "device_123",
+  "isDisabled": false
+}
 ```
 
 ### Broadcast Emergency Mass Control
