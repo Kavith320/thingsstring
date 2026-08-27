@@ -145,11 +145,24 @@ Allows an admin to manually control a device's actuators. This pushes a retained
 }
 ```
 
-**Response:**
+**Payload Validation Rules:**
+- `actuators` MUST be an object.
+- Each key in `actuators` must exist in the target device's hardware configuration (`config.actuators`).
+- Each actuator patch value MUST be an object containing key-value updates.
+
+**Response (200 OK):**
 ```json
 {
   "ok": true,
   "control": { ... }
+}
+```
+
+**Error Response (400 Bad Request):**
+```json
+{
+  "ok": false,
+  "error": "Invalid patch for actuator 'fan'"
 }
 ```
 
@@ -353,6 +366,19 @@ Sends a control command to ALL devices (or a filtered group of devices) simultan
 {
   "actuators": { "light": { "status": false }, "main_relay": { "status": false } },
   "filter": {} // optional MongoDB filter query
+}
+```
+
+**Payload Validation Rules:**
+- `actuators` MUST be an object containing actuator patch objects.
+- `filter` (optional) can be any valid MongoDB query filter to target specific devices.
+
+**Response (200 OK):**
+```json
+{
+  "ok": true,
+  "message": "Broadcast control command sent to 5 devices",
+  "affectedCount": 5
 }
 ```
 

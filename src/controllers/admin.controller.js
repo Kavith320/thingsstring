@@ -239,6 +239,12 @@ async function controlDevice(req, res) {
                     error: `Unknown actuator '${actName}'`,
                 });
             }
+            if (!actPatch || typeof actPatch !== "object") {
+                return res.status(400).json({
+                    ok: false,
+                    error: `Invalid patch for actuator '${actName}'`,
+                });
+            }
             for (const [k, v] of Object.entries(actPatch)) {
                 $set[`actuators.${actName}.${k}`] = v;
             }
@@ -459,8 +465,10 @@ async function broadcastDeviceControl(req, res) {
 
             for (const [actName, actPatch] of Object.entries(actuators)) {
                 if (dev.actuators && dev.actuators[actName]) {
-                    for (const [k, v] of Object.entries(actPatch)) {
-                        $set[`actuators.${actName}.${k}`] = v;
+                    if (actPatch && typeof actPatch === "object") {
+                        for (const [k, v] of Object.entries(actPatch)) {
+                            $set[`actuators.${actName}.${k}`] = v;
+                        }
                     }
                 }
             }
