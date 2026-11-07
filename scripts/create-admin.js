@@ -5,11 +5,15 @@ const User = require("../src/models/User");
 const { generateUniqueUserId8 } = require("../src/utils/userId");
 
 async function main() {
-    const email = process.argv[2];
+    const email = (process.argv[2] || "").trim().toLowerCase();
     const password = process.argv[3];
 
     if (!email || !password) {
         console.error("Usage: node scripts/create-admin.js <email> <password>");
+        process.exit(1);
+    }
+    if (password.length < 8) {
+        console.error("❌ Password must be at least 8 characters");
         process.exit(1);
     }
 
@@ -30,6 +34,7 @@ async function main() {
         // Also update password if provided
         const salt = await bcrypt.genSalt(10);
         existingUser.passwordHash = await bcrypt.hash(password, salt);
+        existingUser.tokenVersion = (existingUser.tokenVersion || 0) + 1; // revoke old sessions
         await existingUser.save();
         console.log(`✅ Updated existing user ${email} to 'admin' role with new password.`);
     } else {

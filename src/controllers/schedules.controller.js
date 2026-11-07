@@ -1,11 +1,25 @@
 // src/controllers/schedules.controller.js
-const mongoose = require("mongoose");
-const { ObjectId } = mongoose.Types;
+const cronParser = require("cron-parser");
+const moment = require("moment-timezone");
 
 const { getDb } = require("../db/mongo");
+const { sendServerError, parseObjectId, isPlainObject: isObject, isSafeKey } = require("../utils/http");
 
-function isObject(v) {
-  return v && typeof v === "object" && !Array.isArray(v);
+const MAX_DURATION_SEC = 7 * 24 * 3600;
+
+/** Same parser Agenda uses, so anything accepted here will actually be scheduled. */
+function cronError(cron, timezone) {
+  if (cron.split(/\s+/).length < 5) return "cron must have 5 (or 6) fields, e.g. '0 8 * * *'";
+  try {
+    cronParser.parseExpression(cron, { tz: timezone || "UTC" });
+    return null;
+  } catch (e) {
+    return `Invalid cron expression: ${e.message}`;
+  }
+}
+
+function timezoneError(tz) {
+  return moment.tz.zone(tz) ? null : `Unknown timezone '${tz}' (use an IANA name like 'Asia/Colombo' or 'UTC')`;
 }
 
 function normalizeActions(actions) {
@@ -13,8 +27,8 @@ function normalizeActions(actions) {
   if (!Array.isArray(actions)) return null;
   for (const a of actions) {
     if (!isObject(a)) return null;
-    if (typeof a.actuator !== "string" || !a.actuator.trim()) return null;
-    if (!isObject(a.set)) return null;
+    if (typeof a.actuator !== "string" || !isSafeKey(a.actuator)) return null;
+    if (!isObject(a.set) || !Object.keys(a.set).every(isSafeKey)) return null;
   }
   return actions;
 }
@@ -34,7 +48,7 @@ function validateActuatorsAgainstConfig(config, actions, endActions) {
 
   for (const item of all) {
     const name = item.actuator;
-    if (!configActuators[name]) {
+    if (!Object.prototype.hasOwnProperty.call(configActuators, name)) {
       return `Unknown actuator '${name}' (not in device_config.actuators)`;
     }
   }
@@ -65,13 +79,15 @@ async function createDeviceSchedule(req, res) {
     if (!name) return res.status(400).json({ ok: false, error: "name is required" });
     if (!cron) return res.status(400).json({ ok: false, error: "cron is required" });
     if (!timezone) return res.status(400).json({ ok: false, error: "timezone is required" });
+    const tzErr = timezoneError(timezone) || cronError(cron, timezone);
+    if (tzErr) return res.status(400).json({ ok: false, error: tzErr });
     if (!actions || actions.length === 0) {
       return res.status(400).json({ ok: false, error: "actions must be a non-empty array" });
     }
 
     if (durationSec !== null) {
-      if (Number.isNaN(durationSec) || durationSec < 1) {
-        return res.status(400).json({ ok: false, error: "duration_sec must be a positive number" });
+      if (Number.isNaN(durationSec) || durationSec < 1 || durationSec > MAX_DURATION_SEC) {
+        return res.status(400).json({ ok: false, error: "duration_sec must be between 1 and 604800" });
       }
       if (!Array.isArray(endActions) || endActions.length === 0) {
         return res.status(400).json({
@@ -114,7 +130,7 @@ async function createDeviceSchedule(req, res) {
       schedule: { _id: result.insertedId, ...doc },
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendServerError(res, e, "schedules");
   }
 }
 
@@ -138,7 +154,7 @@ async function listDeviceSchedules(req, res) {
 
     return res.json({ ok: true, deviceId, count: schedules.length, schedules });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendServerError(res, e, "schedules");
   }
 }
 
@@ -149,12 +165,8 @@ async function updateSchedule(req, res) {
     const userMongoId = req.user.id;
     const { scheduleId } = req.params;
 
-    let _id;
-    try {
-      _id = new ObjectId(scheduleId);
-    } catch {
-      return res.status(400).json({ ok: false, error: "Invalid scheduleId" });
-    }
+    const _id = parseObjectId(scheduleId);
+    if (!_id) return res.status(400).json({ ok: false, error: "Invalid scheduleId" });
 
     const schedulesCol = db.collection("device_schedules");
 
@@ -216,14 +228,19 @@ async function updateSchedule(req, res) {
         body.duration_sec === null ? null : parseInt(body.duration_sec, 10);
 
       if (durationSec !== null) {
-        if (Number.isNaN(durationSec) || durationSec < 1) {
-          return res.status(400).json({ ok: false, error: "duration_sec must be a positive number or null" });
+        if (Number.isNaN(durationSec) || durationSec < 1 || durationSec > MAX_DURATION_SEC) {
+          return res.status(400).json({ ok: false, error: "duration_sec must be between 1 and 604800, or null" });
         }
         $set.duration_sec = durationSec;
       } else {
         $set.duration_sec = null;
       }
     }
+
+    const nextCron = $set.cron !== undefined ? $set.cron : existing.cron;
+    const nextTz = $set.timezone !== undefined ? $set.timezone : existing.timezone;
+    const cronTzErr = timezoneError(nextTz || "UTC") || cronError(nextCron, nextTz);
+    if (cronTzErr) return res.status(400).json({ ok: false, error: cronTzErr });
 
     // If duration_sec will be non-null after update, ensure end_actions exists
     const nextDuration =
@@ -232,7 +249,7 @@ async function updateSchedule(req, res) {
     const nextEndActions =
       $set.end_actions !== undefined ? $set.end_actions : existing.end_actions;
 
-    if (nextDuration !== null && (!Array.isArray(nextEndActions) || nextEndActions.length === 0)) {
+    if (nextDuration != null && (!Array.isArray(nextEndActions) || nextEndActions.length === 0)) {
       return res.status(400).json({
         ok: false,
         error: "end_actions required when duration_sec is provided",
@@ -260,7 +277,7 @@ async function updateSchedule(req, res) {
     const updated = await schedulesCol.findOne({ _id, user_id: userMongoId });
     return res.json({ ok: true, schedule: updated });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendServerError(res, e, "schedules");
   }
 }
 
@@ -276,12 +293,8 @@ async function deleteSchedule(req, res) {
     const userMongoId = req.user.id;
     const { scheduleId } = req.params;
 
-    let _id;
-    try {
-      _id = new ObjectId(scheduleId);
-    } catch {
-      return res.status(400).json({ ok: false, error: "Invalid scheduleId" });
-    }
+    const _id = parseObjectId(scheduleId);
+    if (!_id) return res.status(400).json({ ok: false, error: "Invalid scheduleId" });
 
     const schedulesCol = db.collection("device_schedules");
     const result = await schedulesCol.deleteOne({ _id, user_id: userMongoId });
@@ -292,7 +305,7 @@ async function deleteSchedule(req, res) {
 
     return res.json({ ok: true, deleted: true, scheduleId });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendServerError(res, e, "schedules");
   }
 }
 

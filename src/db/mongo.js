@@ -27,7 +27,7 @@ async function connectMongo(retries = 5, delayMs = 3000) {
     } catch (err) {
       console.error(`⚠️  MongoDB connection attempt ${attempt}/${retries} failed:`, err.message);
       if (attempt < retries) {
-        const wait = delayMs * attempt; // exponential-ish backoff
+        const wait = delayMs * attempt; // linear backoff
         console.log(`🔄 Retrying in ${wait / 1000}s...`);
         await new Promise((res) => setTimeout(res, wait));
       } else {
@@ -42,4 +42,14 @@ function getDb() {
   return db;
 }
 
-module.exports = { connectMongo, getDb };
+function isMongoConnected() {
+  return mongoose.connection.readyState === 1;
+}
+
+async function closeMongo() {
+  if (!db) return;
+  await mongoose.disconnect();
+  db = undefined;
+}
+
+module.exports = { connectMongo, getDb, isMongoConnected, closeMongo };

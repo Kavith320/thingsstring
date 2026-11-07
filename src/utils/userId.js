@@ -1,9 +1,10 @@
 // src/utils/userId.js
+const crypto = require("crypto");
 const User = require("../models/User");
 
 function random8Digits() {
   // 00000000 - 99999999 (string with leading zeros)
-  return Math.floor(Math.random() * 100000000).toString().padStart(8, "0");
+  return crypto.randomInt(0, 100000000).toString().padStart(8, "0");
 }
 
 async function generateUniqueUserId8() {

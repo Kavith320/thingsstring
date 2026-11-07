@@ -316,9 +316,9 @@ Returns all automation rules across all users, enriched with owner details.
 Admin force-delete of any user's automation flow.
 
 ### Global Automation Execution Logs
-`GET /api/admin/automation/logs?status=RAN&limit=100`
+`GET /api/admin/automation/logs?status=ran&limit=100`
 
-Query parameters: `flowId`, `deviceId`, `status` (`RAN` / `SKIPPED`), `limit` (default 100).
+Query parameters: `flowId`, `deviceId` (matches the sensor or the target device), `status` (`ran` / `skipped` / `error`, case-insensitive), `limit` (default 100, max 1000). Newest first. Logs are kept for 30 days.
 
 ## 9. On-Demand Maintenance & System Operations
 
@@ -402,6 +402,26 @@ Sends a control command to ALL devices (or a filtered group of devices) simultan
 }
 ```
 
+## 12. Safety Rules & Audit Coverage
+
+- Every admin action that changes data is written to `admin_audit_logs` (role, status, password reset, deletes, control, lockout, transfer, broadcast, flows, maintenance).
+- An admin cannot demote, disable or delete **themselves**, and the **last active admin** cannot be demoted, disabled or deleted.
+- Changing a user's role or resetting their password **logs that user out everywhere** (existing tokens are revoked).
+- Deleting a user or device also deletes the automation flows that use those devices.
+- Transferring a device to a new owner deletes the previous owner's flows and schedules for that device.
+- Broadcast `filter` may not use `$where`, `$function`, `$accumulator` or `$expr`.
+- Passwords (reset and registration) must be 8–128 characters.
+
+## 13. Backups
+
+Backups are written to `BACKUP_DIR` (default `./backups`) as `full_db_backup_<timestamp>/<collection>.jsonl`, one document per line in Extended JSON (types preserved). Only the newest `BACKUP_KEEP` (default 8) are kept. Restore a collection with:
+
+```bash
+mongoimport --uri "$MONGO_URI" --collection device_config --file device_config.jsonl
+```
+
+Backups contain password hashes: keep the folder private.
+
 ## Usage
 
 To create the first admin user, run:
@@ -410,6 +430,6 @@ node scripts/create-admin.js <email> <password>
 ```
 Example:
 ```bash
-node scripts/create-admin.js admin@thingsstring.com supersecret
+node scripts/create-admin.js admin@thingsstring.com 'a-long-unique-password'
 ```
 
