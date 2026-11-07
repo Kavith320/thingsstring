@@ -95,8 +95,50 @@ Returns all devices owned by the authenticated user, including their current con
 `GET /api/devices/:deviceId`
 
 ### Get Device Telemetry History
-`GET /api/devices/:deviceId/telemetry?limit=50`
-Query Params: `limit` (max 500, default 50).
+`GET /api/devices/:deviceId/telemetry`
+
+The endpoint has two modes.
+
+**1. Latest readings (live polling):** `?limit=N`
+Returns the newest `N` raw telemetry documents, **newest first**. `limit` is 1–500, default 50.
+
+```json
+{ "ok": true, "deviceId": "device_123", "count": 20, "telemetry": [ { "_id": "...", "deviceId": "device_123", "createdAt": "2026-11-08T10:00:05.000Z", "temperature": 24.5, "fw": "1.0.0" } ] }
+```
+
+**2. Time range (graphs):** `?from=<date>&to=<date>&maxPoints=<n>`
+
+| Param | Required | Description |
+|---|---|---|
+| `from` | yes (turns on range mode) | Start of the range: ISO 8601 (`2026-11-08T00:00:00Z`) or epoch milliseconds. |
+| `to` | no | End of the range, same formats. Defaults to now. |
+| `maxPoints` | no | Most points to return. 10–5000, default 1000. |
+
+`limit` is ignored in range mode. Invalid dates, `from` after `to`, or `to` without `from` return `400`.
+
+- If the range holds `maxPoints` documents or fewer, they are returned **raw**, **oldest first**, with every field.
+- If it holds more, the server **downsamples**: the range is split into equal time buckets of `bucketMs = ceil((to - from) / maxPoints)` milliseconds, starting at `from`, and each bucket becomes one point. A point contains the **average of every top-level numeric field**, plus `createdAt` (the bucket start) and `count` (readings in the bucket). Strings, booleans and nested objects (e.g. `actuators`) are left out. Empty buckets are omitted, so gaps mean the device sent nothing.
+
+Example: `GET /api/devices/device_123/telemetry?from=2026-11-07T10:00:00Z&to=2026-11-08T10:00:00Z&maxPoints=500`
+
+```json
+{
+  "ok": true,
+  "deviceId": "device_123",
+  "count": 500,
+  "downsampled": true,
+  "bucketMs": 172800,
+  "from": "2026-11-07T10:00:00.000Z",
+  "to": "2026-11-08T10:00:00.000Z",
+  "retentionDays": 7,
+  "telemetry": [
+    { "createdAt": "2026-11-07T10:00:00.000Z", "count": 35, "temperature": 24.31, "humidity": 60.2, "rssi": -47.1 },
+    { "createdAt": "2026-11-07T10:02:52.800Z", "count": 34, "temperature": 24.36, "humidity": 60.0, "rssi": -46.8 }
+  ]
+}
+```
+
+`downsampled` is `false` and `bucketMs` is `null` when raw documents are returned. `retentionDays` is how long telemetry is kept (older readings no longer exist), so a "30d" or "All" view can never show more than this.
 
 ### Update Device Control (Command)
 `POST /api/devices/:deviceId/control`
@@ -106,17 +148,15 @@ Updates the desired state of actuators on a device.
 ```json
 {
   "actuators": {
-    "fan": {
-      "status": true,
-      "speed": 100
-    },
-    "light": {
-      "status": false
-    }
+    "fan": { "state": "ON", "auto": false }
   }
 }
 ```
-**Note:** Actuator names must exist in the device's configuration. This will publish a retained message to `ts/:deviceId/control` via MQTT.
+**Notes:**
+- Actuator names must exist in the device's configuration. Field names inside an actuator are free-form: the backend stores whatever fields you send (`state`, `auto`, `speed`, ...) and the device firmware decides what they mean. Field names may not contain `.` or start with `$`.
+- `auto: false` switches the actuator to manual mode, so automation flows and schedules leave it alone.
+- The change is saved and published as a retained message to `ts/:deviceId/control` via MQTT.
+- Returns `403` if an admin has locked the device.
 
 ---
 
@@ -133,11 +173,11 @@ Updates the desired state of actuators on a device.
   "timezone": "UTC",
   "enabled": true,
   "actions": [
-    { "actuator": "fan", "set": { "status": true } }
+    { "actuator": "fan", "set": { "state": "ON" } }
   ],
   "duration_sec": 3600,
   "end_actions": [
-    { "actuator": "fan", "set": { "status": false } }
+    { "actuator": "fan", "set": { "state": "OFF" } }
   ]
 }
 ```
@@ -250,11 +290,11 @@ Devices should subscribe to this topic to receive state changes from the platfor
 ```json
 {
   "actuators": {
-    "fan": { "status": true, "speed": 100 },
-    "light": { "status": false }
+    "fan": { "type": "relay", "default": { "state": "OFF", "auto": true }, "state": "ON", "auto": false }
   }
 }
 ```
+The payload is the device's whole control document: each actuator's definition from its config plus the fields set through the API.
 
 ---
 

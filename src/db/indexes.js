@@ -39,6 +39,8 @@ async function ensureIndexes(db) {
   const tasks = [
     // Latest telemetry per device (used everywhere) + 7-day retention
     db.collection("device_telemetry").createIndex({ deviceId: 1, _id: -1 }),
+    // Time-range history queries (graphs)
+    db.collection("device_telemetry").createIndex({ deviceId: 1, createdAt: 1 }),
     ensureTtlIndex(db, "device_telemetry", "createdAt", TELEMETRY_TTL_DAYS * 86400, { adjust: false }),
 
     // Device ownership lookups
