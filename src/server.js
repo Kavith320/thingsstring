@@ -1,58 +1,53 @@
-require("dotenv").config();
+require("dotenv").config({ quiet: true });
 
-const express = require("express");
-const cors = require("cors");
+const { createApp } = require("./app");
+const { connectMongo, getDb, closeMongo } = require("./db/mongo");
+const { ensureIndexes } = require("./db/indexes");
+const { startMqtt, stopMqtt } = require("./mqtt/client");
+const { publishAllControlsOnce, watchControlChanges, stopWatching } = require("./services/controlPublisher");
+const { checkJwtSecretStrength } = require("./utils/jwt");
 
-const { connectMongo } = require("./db/mongo");
-const { startMqtt } = require("./mqtt/client");
-const {
-  publishAllControlsOnce,
-  watchControlChanges,
-} = require("./services/controlPublisher");
+process.on("unhandledRejection", (err) => console.error("❌ Unhandled promise rejection:", err));
 
-const authRoutes = require("./routes/auth.routes");
-const deviceRoutes = require("./routes/devices.routes");
-const scheduleRoutes = require("./routes/schedules.routes"); // if you have it
-const adminRoutes = require("./routes/admin.routes");
-const automationRoutes = require("./routes/automation.routes");
+async function main() {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET missing in .env");
+  checkJwtSecretStrength();
 
-const app = express(); // ✅ must be BEFORE app.use()
-
-// ✅ CORS (temporary allow all)
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
-
-// ✅ JSON body parser
-app.use(express.json());
-
-// ✅ routes
-app.get("/", (req, res) => res.json({ ok: true }));
-
-app.use("/api/auth", authRoutes);
-app.use("/api/devices", deviceRoutes);
-app.use("/api/schedules", scheduleRoutes); // comment if you don’t have schedules.routes.js
-app.use("/api/admin", adminRoutes);
-app.use("/api/automation", automationRoutes);
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, async () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-
-  // 1) Connect DB
+  // 1) DB first, so no request ever hits "MongoDB not ready yet"
   await connectMongo();
+  await ensureIndexes(getDb());
 
-  // 2) Connect MQTT
-  startMqtt("thingsstring-api");
+  // 2) MQTT. This is the ONLY process that ingests device messages and publishes
+  //    control state. Every (re)connect republishes every device's desired state,
+  //    so commands made while MQTT was down are delivered when it comes back.
+  startMqtt({ role: "api", subscribe: true, onConnect: publishAllControlsOnce });
 
-  // 3) Publish current control state once (retain)
-  await publishAllControlsOnce();
-
-  // 4) Watch control updates (real-time)
+  // 3) Publish device_control changes made by any process (API, scheduler, automation)
   await watchControlChanges();
+
+  // 4) HTTP
+  const app = createApp();
+  const PORT = process.env.PORT || 3000;
+  const server = app.listen(PORT, () => console.log(`✅ Server running on http://localhost:${PORT}`));
+
+  let shuttingDown = false;
+  async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`🛑 ${signal} received, shutting down...`);
+    const force = setTimeout(() => process.exit(1), 10000);
+    force.unref();
+    server.close();
+    await stopWatching();
+    await stopMqtt();
+    await closeMongo();
+    process.exit(0);
+  }
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
+main().catch((e) => {
+  console.error("❌ Server failed to start:", e);
+  process.exit(1);
 });

@@ -10,16 +10,27 @@ async function requireAuth(req, res, next) {
     return res.status(401).json({ ok: false, error: "Missing Bearer token" });
   }
 
+  let decoded;
   try {
-    const decoded = verifyToken(token);
+    decoded = verifyToken(token);
+  } catch {
+    return res.status(401).json({ ok: false, error: "Invalid/expired token" });
+  }
 
-    const user = await User.findById(decoded.sub).select("role isActive status email userId8");
+  try {
+    const user = await User.findById(decoded.sub).select("role isActive status email userId8 tokenVersion");
     if (!user) {
       return res.status(401).json({ ok: false, error: "User account no longer exists" });
     }
 
     if (user.isActive === false || user.status === "disabled") {
       return res.status(403).json({ ok: false, error: "User account is suspended" });
+    }
+
+    // Tokens issued before a password reset / role change / Google link are revoked.
+    // Tokens issued before tokenVersion existed carry no `tv` and count as version 0.
+    if ((decoded.tv || 0) !== (user.tokenVersion || 0)) {
+      return res.status(401).json({ ok: false, error: "Session expired, please log in again" });
     }
 
     req.user = {
@@ -30,7 +41,8 @@ async function requireAuth(req, res, next) {
     };
     return next();
   } catch (e) {
-    return res.status(401).json({ ok: false, error: "Invalid/expired token" });
+    console.error("❌ Auth lookup failed:", e);
+    return res.status(500).json({ ok: false, error: "Internal server error" });
   }
 }
 

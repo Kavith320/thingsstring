@@ -1,291 +1,184 @@
+// src/automation/flowJobs.js
+// The automation worker only WRITES desired state to device_control.
+// The API process's change stream publishes it to the device over MQTT.
+
 const { getDb } = require("../db/mongo");
-const { publishControl } = require("../services/controlPublisher");
-const mongoose = require("mongoose");
-const { ObjectId } = mongoose.Types;
+const { parseObjectId } = require("../utils/http");
+const {
+  offlineThresholdSec,
+  getDeviceOnlineState,
+  isAutoMode,
+  deviceOwnerId,
+} = require("../services/deviceState");
 
-/**
- * Helper to get nested value from object using dot notation
- */
+/** Get a nested value using dot notation, own properties only. */
 function getNestedValue(obj, path) {
-    return path.split('.').reduce((acc, part) => acc && acc[part], obj);
+  return path.split(".").reduce((acc, part) => {
+    if (acc === null || typeof acc !== "object") return undefined;
+    return Object.prototype.hasOwnProperty.call(acc, part) ? acc[part] : undefined;
+  }, obj);
+}
+
+function compare(operator, current, target) {
+  switch (operator) {
+    case ">": return current > target;
+    case "<": return current < target;
+    case ">=": return current >= target;
+    case "<=": return current <= target;
+    case "==": return current == target; // eslint-disable-line eqeqeq
+    case "!=": return current != target; // eslint-disable-line eqeqeq
+    default: return false;
+  }
 }
 
 /**
- * Automation Flow Job Implementation
+ * Work out the $set for the actuator, matching the shape the device already uses:
+ * string 'state'/'status' fields get "ON"/"OFF", others get the raw value.
  */
-function defineFlowJobs(agenda) {
-    agenda.define("run_automation_flow", async (job) => {
-        const { flowId } = job.attrs.data || {};
-        if (!flowId) return;
+function buildActuatorSet(actuatorKey, actuatorObj, flowVal) {
+  const $set = {};
+  for (const field of ["state", "status"]) {
+    const current = actuatorObj[field];
+    const def = actuatorObj.default?.[field];
+    if (current === undefined && def === undefined) continue;
 
-        const db = getDb();
-        const flowsCol = db.collection("automation_flows");
-        const flowStateCol = db.collection("automation_flow_state");
-        const configCol = db.collection("device_config");
-        const telemetryCol = db.collection("device_telemetry");
-        const controlCol = db.collection("device_control");
-        const logsCol = db.collection("automation_flow_logs");
-
-        try {
-            // 1) Load flow
-            const flow = await flowsCol.findOne({ _id: new ObjectId(flowId) });
-            if (!flow || !flow.enabled) {
-                console.log(`[AUTOMATION] Flow ${flowId} not found or disabled. Skipping.`);
-                return;
-            }
-
-            // 2) Fetch latest telemetry
-            const latestTelemetry = await telemetryCol.findOne(
-                { deviceId: flow.deviceId },
-                { sort: { _id: -1 } }
-            );
-
-            if (!latestTelemetry) {
-                // console.log(`[AUTOMATION] No telemetry for device ${flow.deviceId}. Skipping.`);
-                await logsCol.insertOne({
-                    flowId: new ObjectId(flowId),
-                    ts: new Date(),
-                    status: "skipped",
-                    reason: "no telemetry"
-                });
-                return;
-            }
-
-            // 2b) Check if sensor device is OFFLINE (telemetry recency threshold)
-            const telemetryTime = latestTelemetry.createdAt
-                ? new Date(latestTelemetry.createdAt).getTime()
-                : (latestTelemetry._id?.getTimestamp ? latestTelemetry._id.getTimestamp().getTime() : 0);
-
-            const maxAgeSec = flow.maxTelemetryAgeSec || parseInt(process.env.DEVICE_OFFLINE_THRESHOLD_SEC || "300", 10);
-            const ageSec = Math.floor((Date.now() - telemetryTime) / 1000);
-
-            if (ageSec > maxAgeSec) {
-                console.log(`⏭️ [AUTOMATION] Device ${flow.deviceId} is OFFLINE (last telemetry was ${ageSec}s ago). Skipping flow "${flow.name}".`);
-                await logsCol.insertOne({
-                    flowId: new ObjectId(flowId),
-                    ts: new Date(),
-                    status: "skipped",
-                    reason: "device offline (stale telemetry)",
-                    telemetryAgeSec: ageSec
-                });
-                return;
-            }
-
-            // 3) Extract currentValue
-            const currentValue = getNestedValue(latestTelemetry, flow.metricPath);
-
-            // 4) Load flow state
-            const flowState = (await flowStateCol.findOne({ flowId: new ObjectId(flowId) })) || {};
-            const { lastValue, lastActionTs } = flowState;
-            const delta = lastValue !== undefined ? Math.abs(currentValue - lastValue) : null;
-
-            // 5) Evaluate Conditions
-            let conditionMet = false;
-
-            // Supporting new 'operator' logic
-            if (flow.condition && flow.condition.operator) {
-                const { operator, value: targetValue } = flow.condition;
-
-                switch (operator) {
-                    case ">": conditionMet = currentValue > targetValue; break;
-                    case "<": conditionMet = currentValue < targetValue; break;
-                    case ">=": conditionMet = currentValue >= targetValue; break;
-                    case "<=": conditionMet = currentValue <= targetValue; break;
-                    case "==": conditionMet = currentValue == targetValue; break;
-                    case "!=": conditionMet = currentValue != targetValue; break;
-                    default: conditionMet = false;
-                }
-            } else {
-                // Fallback to legacy Delta Threshold logic
-                if (lastValue !== undefined) {
-                    conditionMet = delta > (flow.deltaThreshold || 0);
-                } else {
-                    // First run: save value and skip
-                    await flowStateCol.updateOne(
-                        { flowId: new ObjectId(flowId) },
-                        { $set: { lastValue: currentValue, lastValueTs: new Date() } },
-                        { upsert: true }
-                    );
-                    return;
-                }
-            }
-
-            // 6) If condition isn't met, just update lastValue and exit
-            if (!conditionMet) {
-                await flowStateCol.updateOne(
-                    { flowId: new ObjectId(flowId) },
-                    { $set: { lastValue: currentValue, lastValueTs: new Date() } },
-                    { upsert: true }
-                );
-                return;
-            }
-
-            // 7) Cooldown check
-            const now = new Date();
-
-            if (lastActionTs && (now - new Date(lastActionTs)) < (flow.cooldownSec * 1000)) {
-                await logsCol.insertOne({
-                    flowId: new ObjectId(flowId),
-                    ts: now,
-                    status: "skipped",
-                    reason: "cooldown active",
-                    currentValue,
-                    operator: flow.condition?.operator || "delta"
-                });
-                return;
-            }
-
-            // 8) Update device_control
-            const actuatorDeviceId = flow.action.deviceId || flow.deviceId;
-
-            // Check if target actuator device is OFFLINE
-            if (actuatorDeviceId !== flow.deviceId) {
-                const actuatorTelemetry = await telemetryCol.findOne(
-                    { deviceId: actuatorDeviceId },
-                    { sort: { _id: -1 } }
-                );
-                const actTime = actuatorTelemetry?.createdAt
-                    ? new Date(actuatorTelemetry.createdAt).getTime()
-                    : (actuatorTelemetry?._id?.getTimestamp ? actuatorTelemetry._id.getTimestamp().getTime() : 0);
-                const actAgeSec = Math.floor((Date.now() - actTime) / 1000);
-
-                if (actAgeSec > maxAgeSec) {
-                    console.log(`⏭️ [AUTOMATION] Actuator device ${actuatorDeviceId} is OFFLINE (last telemetry ${actAgeSec}s ago). Skipping command.`);
-                    await logsCol.insertOne({
-                        flowId: new ObjectId(flowId),
-                        ts: now,
-                        status: "skipped",
-                        reason: "actuator device offline",
-                        actuatorDeviceId,
-                        telemetryAgeSec: actAgeSec
-                    });
-                    return;
-                }
-            }
-
-            // Check if target actuator device is locked out by admin
-            const actuatorConfig = await configCol.findOne({ _id: actuatorDeviceId });
-            if (actuatorConfig && actuatorConfig.isDisabled) {
-                console.log(`🔒 [AUTOMATION] Device ${actuatorDeviceId} is locked out by admin. Skipping automation command.`);
-                await logsCol.insertOne({
-                    flowId: new ObjectId(flowId),
-                    ts: now,
-                    status: "skipped",
-                    reason: "device locked out by admin",
-                    actuatorDeviceId
-                });
-                return;
-            }
-
-            const control = (await controlCol.findOne({ _id: actuatorDeviceId })) || {};
-            const actuators = control.actuators || {};
-            const actuatorKey = flow.action.actuatorKey;
-
-            if (!actuators[actuatorKey]) {
-                console.log(`[AUTOMATION] Actuator '${actuatorKey}' not found on device ${actuatorDeviceId}`);
-                await logsCol.insertOne({
-                    flowId: new ObjectId(flowId),
-                    ts: now,
-                    status: "error",
-                    reason: `actuator '${actuatorKey}' not found`
-                });
-                return;
-            }
-
-            const actuatorObj = actuators[actuatorKey];
-
-            // Check if in auto mode
-            if (actuatorObj.default?.auto !== true && actuatorObj.auto !== true) {
-                console.log(`[AUTOMATION] Actuator '${actuatorKey}' skipped (manual mode) for device ${actuatorDeviceId}`);
-                await logsCol.insertOne({
-                    flowId: new ObjectId(flowId),
-                    ts: now,
-                    status: "skipped",
-                    reason: "manual mode",
-                    currentValue
-                });
-                return;
-            }
-
-            // --- SMART VALUE MAPPING ---
-            const flowVal = flow.action.setValue;
-            const $set = {};
-
-            // Determine if the device likely uses string states (ON/OFF)
-            // We check the top level OR the default object for clues
-            const hasStateKey = actuatorObj.hasOwnProperty('state');
-            const hasStatusKey = actuatorObj.hasOwnProperty('status');
-            const defaultState = actuatorObj.default?.state;
-            const defaultStatus = actuatorObj.default?.status;
-
-            const isStringState = (typeof actuatorObj.state === 'string') ||
-                (typeof defaultState === 'string');
-            const isStringStatus = (typeof actuatorObj.status === 'string') ||
-                (typeof defaultStatus === 'string');
-
-            // 1. Handle 'state'
-            if (hasStateKey || defaultState !== undefined || isStringState) {
-                let mappedVal = flowVal;
-                // If it looks like it wants ON/OFF, give it ON/OFF
-                if (isStringState || (defaultState && (defaultState === 'ON' || defaultState === 'OFF'))) {
-                    mappedVal = flowVal ? 'ON' : 'OFF';
-                }
-                $set[`actuators.${actuatorKey}.state`] = mappedVal;
-            }
-
-            // 2. Handle 'status'
-            if (hasStatusKey || defaultStatus !== undefined || isStringStatus) {
-                let mappedVal = flowVal;
-                if (isStringStatus || (defaultStatus && (defaultStatus === 'ON' || defaultStatus === 'OFF'))) {
-                    mappedVal = flowVal ? 'ON' : 'OFF';
-                }
-                $set[`actuators.${actuatorKey}.status`] = mappedVal;
-            }
-
-            // 3. Always update 'value' as well
-            $set[`actuators.${actuatorKey}.value`] = flowVal;
-
-            // Apply updates to DB
-            await controlCol.updateOne(
-                { _id: actuatorDeviceId },
-                { $set },
-                { upsert: true }
-            );
-
-            // Fetch latest and publish
-            const controlDoc = await controlCol.findOne({ _id: actuatorDeviceId });
-            publishControl(actuatorDeviceId, controlDoc);
-
-            console.log(`🚀 [AUTOMATION] Flow "${flow.name}" logic met (${currentValue} ${flow.condition?.operator} ${flow.condition?.value}). Command sent to ${actuatorDeviceId}.`);
-
-            // 9) Update flow state
-            await flowStateCol.updateOne(
-                { flowId: new ObjectId(flowId) },
-                {
-                    $set: {
-                        lastValue: currentValue,
-                        lastValueTs: now,
-                        lastActionTs: now
-                    }
-                },
-                { upsert: true }
-            );
-
-            // 10) Log record
-            await logsCol.insertOne({
-                flowId: new ObjectId(flowId),
-                ts: now,
-                status: "ran",
-                currentValue,
-                previousValue: lastValue,
-                delta,
-                action: flow.action
-            });
-
-        } catch (error) {
-            console.error(`❌ [AUTOMATION] Error in flow ${flowId}:`, error);
-        }
-    });
+    const isStringish = typeof current === "string" || typeof def === "string";
+    $set[`actuators.${actuatorKey}.${field}`] = isStringish ? (flowVal ? "ON" : "OFF") : flowVal;
+  }
+  $set[`actuators.${actuatorKey}.value`] = flowVal;
+  return $set;
 }
 
-module.exports = { defineFlowJobs };
+/**
+ * Run one evaluation of an automation flow. Exported for tests.
+ */
+async function runFlow(db, flowId) {
+  const _id = parseObjectId(String(flowId));
+  if (!_id) return;
+
+  const flowsCol = db.collection("automation_flows");
+  const flowStateCol = db.collection("automation_flow_state");
+  const configCol = db.collection("device_config");
+  const telemetryCol = db.collection("device_telemetry");
+  const controlCol = db.collection("device_control");
+  const logsCol = db.collection("automation_flow_logs");
+
+  const flow = await flowsCol.findOne({ _id });
+  if (!flow || !flow.enabled) return;
+
+  const actuatorDeviceId = flow.action?.deviceId || flow.deviceId;
+  const log = (entry) =>
+    logsCol.insertOne({ flowId: _id, deviceId: flow.deviceId, actuatorDeviceId, ts: new Date(), ...entry });
+  const saveValue = (value, extra = {}) =>
+    flowStateCol.updateOne(
+      { flowId: _id },
+      { $set: { lastValue: value, lastValueTs: new Date(), ...extra } },
+      { upsert: true }
+    );
+
+  // 1) The flow owner must still own both devices (devices can be transferred or deleted)
+  const [sensorCfg, actuatorCfg] = await Promise.all([
+    configCol.findOne({ _id: flow.deviceId }),
+    configCol.findOne({ _id: actuatorDeviceId }),
+  ]);
+  if (!sensorCfg || !actuatorCfg) {
+    return log({ status: "error", reason: "device not found" });
+  }
+  if (deviceOwnerId(sensorCfg) !== String(flow.user_id) || deviceOwnerId(actuatorCfg) !== String(flow.user_id)) {
+    console.log(`🔒 [AUTOMATION] Flow "${flow.name}" skipped: owner no longer owns the device(s)`);
+    return log({ status: "error", reason: "flow owner does not own device" });
+  }
+
+  // 2) Latest telemetry + offline check on the sensor
+  const maxAgeSec = flow.maxTelemetryAgeSec || offlineThresholdSec();
+  const latestTelemetry = await telemetryCol.findOne({ deviceId: flow.deviceId }, { sort: { _id: -1 } });
+  if (!latestTelemetry) return log({ status: "skipped", reason: "no telemetry" });
+
+  const sensorState = await getDeviceOnlineState(db, flow.deviceId, maxAgeSec);
+  if (!sensorState.online) {
+    console.log(`⏭️ [AUTOMATION] Device ${flow.deviceId} is OFFLINE (last telemetry ${sensorState.ageSec}s ago). Skipping flow "${flow.name}".`);
+    return log({ status: "skipped", reason: "device offline (stale telemetry)", telemetryAgeSec: sensorState.ageSec });
+  }
+
+  // 3) Read the metric. A missing metric never triggers (previously `!=` fired on it).
+  const currentValue = getNestedValue(latestTelemetry, flow.metricPath);
+  if (currentValue === undefined || currentValue === null) {
+    return log({ status: "skipped", reason: `metric '${flow.metricPath}' not in telemetry` });
+  }
+
+  // 4) Evaluate
+  const flowState = (await flowStateCol.findOne({ flowId: _id })) || {};
+  const { lastValue, lastActionTs } = flowState;
+  const numeric = typeof currentValue === "number" && typeof lastValue === "number";
+  const delta = lastValue !== undefined && numeric ? Math.abs(currentValue - lastValue) : null;
+
+  let conditionMet;
+  if (flow.condition && flow.condition.operator) {
+    conditionMet = compare(flow.condition.operator, currentValue, flow.condition.value);
+  } else if (lastValue === undefined) {
+    // Delta mode, first run: remember the value and wait for a change
+    return saveValue(currentValue);
+  } else {
+    conditionMet = delta !== null && delta > (flow.deltaThreshold || 0);
+  }
+
+  if (!conditionMet) return saveValue(currentValue);
+
+  // 5) Cooldown
+  const now = new Date();
+  if (lastActionTs && now - new Date(lastActionTs) < (flow.cooldownSec || 0) * 1000) {
+    return log({ status: "skipped", reason: "cooldown active", currentValue, operator: flow.condition?.operator || "delta" });
+  }
+
+  // 6) Target device checks: online (if it's a different hub) and not locked out
+  if (actuatorDeviceId !== flow.deviceId) {
+    const actState = await getDeviceOnlineState(db, actuatorDeviceId, maxAgeSec);
+    if (!actState.online) {
+      console.log(`⏭️ [AUTOMATION] Actuator device ${actuatorDeviceId} is OFFLINE. Skipping command.`);
+      return log({ status: "skipped", reason: "actuator device offline", telemetryAgeSec: actState.ageSec });
+    }
+  }
+  if (actuatorCfg.isDisabled) {
+    console.log(`🔒 [AUTOMATION] Device ${actuatorDeviceId} is locked out by admin. Skipping automation command.`);
+    return log({ status: "skipped", reason: "device locked out by admin" });
+  }
+
+  const control = (await controlCol.findOne({ _id: actuatorDeviceId })) || {};
+  const actuatorKey = flow.action.actuatorKey;
+  const actuatorObj = control.actuators?.[actuatorKey];
+
+  if (!actuatorObj || typeof actuatorObj !== "object") {
+    console.log(`[AUTOMATION] Actuator '${actuatorKey}' not found on device ${actuatorDeviceId}`);
+    return log({ status: "error", reason: `actuator '${actuatorKey}' not found` });
+  }
+  if (!isAutoMode(actuatorObj)) {
+    return log({ status: "skipped", reason: "manual mode", currentValue });
+  }
+
+  // 7) Write desired state (the API publishes it over MQTT)
+  await controlCol.updateOne(
+    { _id: actuatorDeviceId },
+    { $set: buildActuatorSet(actuatorKey, actuatorObj, flow.action.setValue) }
+  );
+
+  console.log(
+    `🚀 [AUTOMATION] Flow "${flow.name}" met (${currentValue} ${flow.condition?.operator || "Δ"} ${flow.condition?.value ?? flow.deltaThreshold}). Command written for ${actuatorDeviceId}.`
+  );
+
+  await saveValue(currentValue, { lastActionTs: now });
+  await log({ status: "ran", currentValue, previousValue: lastValue, delta, action: flow.action });
+}
+
+function defineFlowJobs(agenda) {
+  agenda.define("run_automation_flow", async (job) => {
+    const { flowId } = job.attrs.data || {};
+    if (!flowId) return;
+    try {
+      await runFlow(getDb(), flowId);
+    } catch (error) {
+      console.error(`❌ [AUTOMATION] Error in flow ${flowId}:`, error);
+    }
+  });
+}
+
+module.exports = { defineFlowJobs, runFlow, getNestedValue, buildActuatorSet };

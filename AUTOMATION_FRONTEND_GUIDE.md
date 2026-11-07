@@ -11,7 +11,7 @@ The frontend should manage the following object structure for every automation f
 | `name` | string | Name of the automation (e.g. "Greenhouse Temp") |
 | `deviceId` | string | **Sensor Hub ID.** Provides the telemetry data. |
 | `enabled` | boolean | Global toggle for the flow. |
-| `intervalSec` | number | Polling rate in seconds (minimum 5s). |
+| `intervalSec` | number | Polling rate in seconds (clamped to 5–86400). |
 | `metricPath` | string | JSON path to monitor (e.g. `sensors.temp`). |
 | `deltaThreshold`| number | (Optional) Fallback: Trigger if change > this value. |
 | **`condition`** | object | **NEW.** Logical rule for triggering. |
@@ -53,7 +53,7 @@ The frontend should manage the following object structure for every automation f
 ## 3. Integration Rules for Visual Designer
 
 ### A. The "Auto Mode" Prerequisite
-The backend worker will **only** execute commands if the target actuator is set to `auto` in the device configuration.
+The backend worker will **only** execute commands if the target actuator is in AUTO mode. The live `actuators.<key>.auto` flag in device control wins; if it is not set, `default.auto` from the device config is used. Setting `auto: false` through the control API switches an actuator to manual even if its default is auto.
 - **UI Logic**: When setting up an action node, display a warning: *"Ensure this actuator is in AUTO mode in the Device Panel."*
 
 ### B. Canvas Persistence (`ui_metadata`)
@@ -69,6 +69,7 @@ Standardize on the field name **`setValue`** for the command payload. This ensur
 The designer now allows cross-device triggering. 
 - The top-level `deviceId` remains the **Sensor**.
 - The `action.deviceId` is the **Actuator**.
+- Both must be devices the logged-in user owns; otherwise the API returns `404`.
 - If the user selects the same hub for both, just set them both to the same ID.
 
 ### E. Algebraic Conditions

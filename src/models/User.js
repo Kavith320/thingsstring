@@ -16,9 +16,12 @@ const userSchema = new mongoose.Schema(
     googleId: { type: String, index: true },
     emailVerified: { type: Boolean, default: false },
 
-    role: { type: String, default: "user" },
+    role: { type: String, enum: ["user", "admin"], default: "user" },
     isActive: { type: Boolean, default: true },
     status: { type: String, enum: ["active", "disabled"], default: "active" },
+
+    // Bumped to revoke every token issued before (password reset, role change, ...)
+    tokenVersion: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

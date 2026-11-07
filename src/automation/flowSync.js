@@ -1,60 +1,70 @@
 const { getDb } = require("../db/mongo");
 
 /**
- * Sync automation flows from MongoDB to Agenda jobs
+ * Sync automation flows from MongoDB to Agenda jobs.
+ *
+ * A job is (re)saved ONLY when the flow is new or its interval changed.
+ * Re-saving every sync recomputed nextRunAt = now + interval, so any flow whose
+ * interval was longer than the sync period was pushed back forever and never ran.
  */
 async function startFlowSync(agenda, { intervalMs = 5000 } = {}) {
-    const db = getDb();
-    const flowsCol = db.collection("automation_flows");
+  const flowsCol = getDb().collection("automation_flows");
 
-    async function syncOnce() {
-        try {
-            const enabledFlows = await flowsCol.find({ enabled: true }).toArray();
-            const enabledIds = new Set(enabledFlows.map((f) => String(f._id)));
+  async function syncOnce() {
+    const enabledFlows = await flowsCol.find({ enabled: true }, { projection: { intervalSec: 1 } }).toArray();
+    const wanted = new Map(enabledFlows.map((f) => [String(f._id), `${f.intervalSec || 60} seconds`]));
 
-            // ✅ Upsert jobs for enabled flows
-            for (const flow of enabledFlows) {
-                const flowId = String(flow._id);
-                const intervalSec = flow.intervalSec || 60;
-
-                const job = agenda.create("run_automation_flow", { flowId });
-
-                // Use uniqueness to prevent duplicate jobs for the same flow
-                job.unique({ "data.flowId": flowId });
-
-                // Schedule repetition
-                job.repeatEvery(`${intervalSec} seconds`, {
-                    skipImmediate: true
-                });
-
-                await job.save();
-            }
-
-            // ✅ Cancel jobs for disabled or deleted flows
-            const existingJobs = await agenda.jobs({ name: "run_automation_flow" });
-
-            for (const job of existingJobs) {
-                const fid = String(job.attrs?.data?.flowId || "");
-                if (fid && !enabledIds.has(fid)) {
-                    await agenda.cancel({ name: "run_automation_flow", "data.flowId": fid });
-                    console.log(`🧹 [AUTOMATION] canceled job for disabled/deleted flowId=${fid}`);
-                }
-            }
-        } catch (error) {
-            console.error("❌ [AUTOMATION] Flow sync error:", error.message);
-        }
+    const existingJobs = await agenda.jobs({ name: "run_automation_flow" });
+    const existing = new Map();
+    for (const job of existingJobs) {
+      const fid = String(job.attrs?.data?.flowId || "");
+      if (!fid) continue;
+      if (existing.has(fid)) {
+        // Duplicate job for one flow (from older versions): drop the extra
+        await job.remove();
+        continue;
+      }
+      existing.set(fid, job);
     }
 
-    // Initial sync
-    await syncOnce();
-    console.log("🧠 Automation flow sync: initial load done");
+    // Create / update jobs whose interval changed
+    for (const [flowId, interval] of wanted) {
+      const job = existing.get(flowId);
+      if (job && job.attrs.repeatInterval === interval && job.attrs.nextRunAt) continue;
 
-    // Periodic sync
-    const interval = setInterval(() => {
-        syncOnce().catch((e) => console.error("❌ [AUTOMATION] Flow sync error:", e.message));
-    }, intervalMs);
+      const next = agenda.create("run_automation_flow", { flowId });
+      next.unique({ "data.flowId": flowId });
+      next.repeatEvery(interval, { skipImmediate: true });
+      await next.save();
+      console.log(`🧠 [AUTOMATION] scheduled flowId=${flowId} every ${interval}`);
+    }
 
-    return interval;
+    // Cancel jobs for disabled or deleted flows
+    for (const fid of existing.keys()) {
+      if (!wanted.has(fid)) {
+        await agenda.cancel({ name: "run_automation_flow", "data.flowId": fid });
+        console.log(`🧹 [AUTOMATION] canceled job for disabled/deleted flowId=${fid}`);
+      }
+    }
+  }
+
+  await syncOnce();
+  console.log("🧠 Automation flow sync: initial load done");
+
+  let running = false;
+  const interval = setInterval(async () => {
+    if (running) return; // never overlap syncs
+    running = true;
+    try {
+      await syncOnce();
+    } catch (e) {
+      console.error("❌ [AUTOMATION] Flow sync error:", e.message);
+    } finally {
+      running = false;
+    }
+  }, intervalMs);
+
+  return interval;
 }
 
 module.exports = { startFlowSync };

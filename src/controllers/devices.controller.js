@@ -1,45 +1,36 @@
 // src/controllers/devices.controller.js
 const { getDb } = require("../db/mongo");
+const { publishControl } = require("../services/controlPublisher");
+const { findOwnedDevice } = require("../services/deviceState");
+const { sendServerError, isPlainObject, isSafeKey, clampInt } = require("../utils/http");
+
+async function latestTelemetry(db, deviceId) {
+  return db.collection("device_telemetry").findOne({ deviceId }, { sort: { _id: -1 } });
+}
 
 // GET /api/devices
 async function listMyDevices(req, res) {
   try {
     const db = getDb();
-    const userMongoId = req.user.id;
+    const configs = await db.collection("device_config").find({ "device.user_id": req.user.id }).toArray();
+    const ids = configs.map((c) => c._id);
 
-    const configCol = db.collection("device_config");
-    const telemetryCol = db.collection("device_telemetry");
-    const controlCol = db.collection("device_control");
+    const [controls, telemetry] = await Promise.all([
+      db.collection("device_control").find({ _id: { $in: ids } }).toArray(),
+      Promise.all(ids.map((id) => latestTelemetry(db, id))),
+    ]);
+    const controlById = new Map(controls.map((c) => [c._id, c]));
 
-    const configs = await configCol
-      .find({ "device.user_id": userMongoId })
-      .toArray();
+    const devices = configs.map((cfg, i) => ({
+      deviceId: cfg._id,
+      config: cfg,
+      last_telemetry: telemetry[i] || null,
+      control: controlById.get(cfg._id) || null,
+    }));
 
-    const results = await Promise.all(
-      configs.map(async (cfg) => {
-        const deviceId = cfg._id;
-
-        const lastTelemetry = await telemetryCol
-          .find({ deviceId })
-          .sort({ _id: -1 })
-          .limit(1)
-          .toArray()
-          .then((arr) => (arr[0] ? arr[0] : null));
-
-        const control = await controlCol.findOne({ _id: deviceId });
-
-        return {
-          deviceId,
-          config: cfg,
-          last_telemetry: lastTelemetry,
-          control,
-        };
-      })
-    );
-
-    return res.json({ ok: true, count: results.length, devices: results });
+    return res.json({ ok: true, count: devices.length, devices });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendServerError(res, e, "list devices");
   }
 }
 
@@ -47,42 +38,22 @@ async function listMyDevices(req, res) {
 async function getDeviceById(req, res) {
   try {
     const db = getDb();
-    const userMongoId = req.user.id;
     const { deviceId } = req.params;
 
-    const configCol = db.collection("device_config");
-    const telemetryCol = db.collection("device_telemetry");
-    const controlCol = db.collection("device_control");
+    const config = await findOwnedDevice(db, deviceId, req.user.id);
+    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
 
-    const config = await configCol.findOne({
-      _id: deviceId,
-      "device.user_id": userMongoId,
-    });
-
-    if (!config) {
-      return res.status(404).json({ ok: false, error: "Device not found" });
-    }
-
-    const lastTelemetry = await telemetryCol
-      .find({ deviceId })
-      .sort({ _id: -1 })
-      .limit(1)
-      .toArray()
-      .then((arr) => (arr[0] ? arr[0] : null));
-
-    const control = await controlCol.findOne({ _id: deviceId });
+    const [lastTelemetry, control] = await Promise.all([
+      latestTelemetry(db, deviceId),
+      db.collection("device_control").findOne({ _id: deviceId }),
+    ]);
 
     return res.json({
       ok: true,
-      device: {
-        deviceId,
-        config,
-        last_telemetry: lastTelemetry,
-        control,
-      },
+      device: { deviceId, config, last_telemetry: lastTelemetry, control },
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendServerError(res, e, "get device");
   }
 }
 
@@ -90,69 +61,60 @@ async function getDeviceById(req, res) {
 async function getDeviceTelemetry(req, res) {
   try {
     const db = getDb();
-    const userMongoId = req.user.id;
     const { deviceId } = req.params;
+    const limit = clampInt(req.query.limit, { min: 1, max: 500, fallback: 50 });
 
-    let limit = parseInt(req.query.limit || "50", 10);
-    if (Number.isNaN(limit)) limit = 50;
-    if (limit > 500) limit = 500;
-    if (limit < 1) limit = 1;
+    const config = await findOwnedDevice(db, deviceId, req.user.id);
+    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
 
-    const configCol = db.collection("device_config");
-    const telemetryCol = db.collection("device_telemetry");
-
-    const config = await configCol.findOne({
-      _id: deviceId,
-      "device.user_id": userMongoId,
-    });
-
-    if (!config) {
-      return res.status(404).json({ ok: false, error: "Device not found" });
-    }
-
-    const telemetry = await telemetryCol
+    const telemetry = await db
+      .collection("device_telemetry")
       .find({ deviceId })
       .sort({ _id: -1 })
       .limit(limit)
       .toArray();
 
-    return res.json({
-      ok: true,
-      deviceId,
-      count: telemetry.length,
-      telemetry,
-    });
+    return res.json({ ok: true, deviceId, count: telemetry.length, telemetry });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendServerError(res, e, "get telemetry");
   }
 }
-const { publishControl } = require("../services/controlPublisher");
 
+/**
+ * Validate an `actuators` patch against a device config and build the $set.
+ * Returns { error } or { $set }. Shared by the user and admin control endpoints.
+ */
+function buildControlSet(config, updates) {
+  if (!isPlainObject(updates) || Object.keys(updates).length === 0) {
+    return { error: "Body must include a non-empty actuators object" };
+  }
+  const configActuators = isPlainObject(config.actuators) ? config.actuators : {};
+  const $set = {};
+
+  for (const [actName, actPatch] of Object.entries(updates)) {
+    if (!isSafeKey(actName) || !Object.prototype.hasOwnProperty.call(configActuators, actName)) {
+      return { error: `Unknown actuator '${actName}' (not in device_config)` };
+    }
+    if (!isPlainObject(actPatch) || Object.keys(actPatch).length === 0) {
+      return { error: `Invalid patch for actuator '${actName}'` };
+    }
+    for (const [k, v] of Object.entries(actPatch)) {
+      if (!isSafeKey(k)) return { error: `Invalid field '${k}' for actuator '${actName}'` };
+      $set[`actuators.${actName}.${k}`] = v;
+    }
+  }
+  return { $set };
+}
+
+// POST /api/devices/:deviceId/control
 async function updateDeviceControl(req, res) {
   try {
     const db = getDb();
-    const userMongoId = req.user.id;
     const { deviceId } = req.params;
-
-    const configCol = db.collection("device_config");
     const controlCol = db.collection("device_control");
 
-    const body = req.body || {};
-    const updates = body.actuators;
-
-    if (!updates || typeof updates !== "object") {
-      return res.status(400).json({ ok: false, error: "Body must include actuators object" });
-    }
-
-    // 1) verify device belongs to user
-    const config = await configCol.findOne({
-      _id: deviceId,
-      "device.user_id": userMongoId,
-    });
-
-    if (!config) {
-      return res.status(404).json({ ok: false, error: "Device not found" });
-    }
+    const config = await findOwnedDevice(db, deviceId, req.user.id);
+    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
 
     if (config.isDisabled) {
       return res.status(403).json({
@@ -161,51 +123,26 @@ async function updateDeviceControl(req, res) {
       });
     }
 
-    const configActuators = config.actuators || {};
+    const { error, $set } = buildControlSet(config, (req.body || {}).actuators);
+    if (error) return res.status(400).json({ ok: false, error });
 
-    // 2) validate and build $set dynamically
-    const $set = {};
-
-    for (const [actName, actPatch] of Object.entries(updates)) {
-      // actuator must exist in config
-      if (!configActuators[actName]) {
-        return res.status(400).json({
-          ok: false,
-          error: `Unknown actuator '${actName}' (not in device_config)`,
-        });
-      }
-
-      if (!actPatch || typeof actPatch !== "object") {
-        return res.status(400).json({ ok: false, error: `Invalid patch for actuator '${actName}'` });
-      }
-
-      // set each field under actuators.<actName>.<field>
-      for (const [k, v] of Object.entries(actPatch)) {
-        $set[`actuators.${actName}.${k}`] = v;
-      }
-    }
-
-    // 3) apply update (one doc per device)
-    await controlCol.updateOne(
+    const controlDoc = await controlCol.findOneAndUpdate(
       { _id: deviceId },
       { $set },
-      { upsert: true }
+      { upsert: true, returnDocument: "after" }
     );
-
-    // 4) read latest control doc and publish to MQTT
-    const controlDoc = await controlCol.findOne({ _id: deviceId });
     publishControl(deviceId, controlDoc);
 
     return res.json({ ok: true, deviceId, control: controlDoc });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return sendServerError(res, e, "device control");
   }
 }
-
 
 module.exports = {
   listMyDevices,
   getDeviceById,
   getDeviceTelemetry,
   updateDeviceControl,
+  buildControlSet,
 };

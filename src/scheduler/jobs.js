@@ -1,67 +1,72 @@
 // src/scheduler/jobs.js
 const { getDb } = require("../db/mongo");
+const { getDeviceOnlineState, isAutoMode } = require("../services/deviceState");
 
 /**
- * Apply actions to device_control
- * - Only updates actuators where auto === true
- * - Does NOT publish MQTT (publisher handles that)
+ * Apply schedule actions to device_control.
+ * - Only updates actuators in AUTO mode, never on admin-locked devices.
+ * - START actions are skipped while the device is offline (no ghost triggers).
+ * - END actions are ALWAYS written, even if the device is offline: the control
+ *   message is retained, so the device receives "off" as soon as it reconnects.
+ *   Skipping them used to leave e.g. a pump running indefinitely.
+ * - Does NOT publish MQTT (the API's change stream publishes device_control).
+ *
+ * Returns a short result string (used by tests and logs).
  */
-async function applyActions(deviceId, actions) {
+async function applyActions(deviceId, actions, { phase = "start" } = {}) {
   const db = getDb();
   const controlCol = db.collection("device_control");
-  const telemetryCol = db.collection("device_telemetry");
+  const tag = phase === "end" ? "END" : "START";
 
-  // Check if device is OFFLINE (telemetry recency threshold: default 5 minutes / 300 seconds)
-  const lastTelemetry = await telemetryCol.findOne(
-    { deviceId },
-    { sort: { _id: -1 } }
-  );
+  const config = await db.collection("device_config").findOne({ _id: deviceId }, { projection: { isDisabled: 1 } });
+  if (!config) {
+    console.log(`⚠️ [SCHEDULER] ${tag}: device ${deviceId} not found`);
+    return "device-missing";
+  }
+  if (config.isDisabled) {
+    console.log(`🔒 [SCHEDULER] ${tag}: device ${deviceId} is locked out by admin. Skipping.`);
+    return "locked";
+  }
 
-  if (lastTelemetry) {
-    const telemetryTime = lastTelemetry.createdAt
-      ? new Date(lastTelemetry.createdAt).getTime()
-      : (lastTelemetry._id?.getTimestamp ? lastTelemetry._id.getTimestamp().getTime() : 0);
-
-    const maxAgeSec = parseInt(process.env.DEVICE_OFFLINE_THRESHOLD_SEC || "300", 10);
-    const ageSec = Math.floor((Date.now() - telemetryTime) / 1000);
-
-    if (ageSec > maxAgeSec) {
-      console.log(`⏭️ [SCHEDULER] Device ${deviceId} is OFFLINE (last telemetry was ${ageSec}s ago). Skipping schedule actions.`);
-      return;
+  if (phase === "start") {
+    const { online, ageSec } = await getDeviceOnlineState(db, deviceId);
+    if (!online) {
+      console.log(
+        `⏭️ [SCHEDULER] Device ${deviceId} is OFFLINE (${ageSec === null ? "no telemetry" : `last telemetry ${ageSec}s ago`}). Skipping START actions.`
+      );
+      return "offline";
     }
   }
 
   const control = (await controlCol.findOne({ _id: deviceId })) || {};
   const actuators = control.actuators || {};
-
   const $set = {};
 
   for (const action of actions || []) {
     const actuatorName = action.actuator;
     const patch = action.set || {};
 
-    if (!actuators[actuatorName]) {
+    if (!actuators[actuatorName] || typeof actuators[actuatorName] !== "object") {
       console.log(`⚠️ [SCHEDULER] actuator '${actuatorName}' not found on device ${deviceId}`);
       continue;
     }
-
-    if (actuators[actuatorName].default?.auto !== true) {
+    if (!isAutoMode(actuators[actuatorName])) {
       console.log(`⏭️ [SCHEDULER] actuator '${actuatorName}' skipped (manual mode)`);
       continue;
     }
-
     for (const [key, value] of Object.entries(patch)) {
       $set[`actuators.${actuatorName}.${key}`] = value;
     }
   }
 
   if (Object.keys($set).length === 0) {
-    console.log(`⚠️ [SCHEDULER] No actions applied for device ${deviceId}`);
-    return;
+    console.log(`⚠️ [SCHEDULER] No ${tag} actions applied for device ${deviceId}`);
+    return "nothing";
   }
 
   await controlCol.updateOne({ _id: deviceId }, { $set }, { upsert: true });
-  console.log(`✅ [SCHEDULER] device_control updated for device ${deviceId}`);
+  console.log(`✅ [SCHEDULER] ${tag}: device_control updated for device ${deviceId}`);
+  return "applied";
 }
 
 /**
@@ -71,18 +76,15 @@ function defineJobs(agenda) {
   // 🔹 START actions
   agenda.define("run-device-schedule", async (job) => {
     const { scheduleId, deviceId, actions, end_actions, duration_sec } = job.attrs.data || {};
-
     console.log(`⏰ [SCHEDULER] START schedule=${scheduleId} device=${deviceId} at ${new Date().toISOString()}`);
 
-    await applyActions(deviceId, actions);
+    const result = await applyActions(deviceId, actions, { phase: "start" });
 
-    // Handle duration → schedule END job
-    if (duration_sec && Array.isArray(end_actions) && end_actions.length > 0) {
-      // ✅ IMPORTANT: prevent multiple queued end jobs for same schedule
+    // Only schedule an END if the START actually changed something
+    if (result === "applied" && duration_sec && Array.isArray(end_actions) && end_actions.length > 0) {
+      // prevent multiple queued end jobs for the same schedule
       await agenda.cancel({ name: "run-device-schedule-end", "data.scheduleId": String(scheduleId) });
-
       console.log(`⏳ [SCHEDULER] scheduling END in ${duration_sec}s for schedule=${scheduleId} device=${deviceId}`);
-
       await agenda.schedule(`${duration_sec} seconds`, "run-device-schedule-end", {
         scheduleId: String(scheduleId),
         deviceId,
@@ -94,10 +96,10 @@ function defineJobs(agenda) {
   // 🔹 END actions
   agenda.define("run-device-schedule-end", async (job) => {
     const { scheduleId, deviceId, end_actions } = job.attrs.data || {};
-
     console.log(`⏰ [SCHEDULER] END schedule=${scheduleId} device=${deviceId} at ${new Date().toISOString()}`);
-
-    await applyActions(deviceId, end_actions);
+    await applyActions(deviceId, end_actions, { phase: "end" });
+    // One-off job: remove it once done so finished END jobs don't pile up
+    await job.remove().catch(() => {});
   });
 
   // 📦 WEEKLY BACKUP & TELEMETRY CLEANUP
@@ -113,5 +115,4 @@ function defineJobs(agenda) {
   });
 }
 
-module.exports = { defineJobs };
-
+module.exports = { defineJobs, applyActions };

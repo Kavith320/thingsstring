@@ -23,7 +23,8 @@ async function logAdminAction({ adminId, adminEmail, action, targetId = null, de
       action,
       targetId: targetId ? String(targetId) : null,
       details,
-      ip: req ? (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || null) : null,
+      // req.ip honours the TRUST_PROXY setting; a raw X-Forwarded-For header can be forged by the caller
+      ip: req ? req.ip || null : null,
       userAgent: req ? req.headers["user-agent"] : null,
       timestamp: new Date(),
     };
