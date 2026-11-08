@@ -110,12 +110,12 @@ async function createInvite(req, res) {
 
     const [inviter, ui] = await Promise.all([
       db.collection("users").findOne({ _id: new ObjectId(req.user.id) }, { projection: { name: 1 } }),
-      db.collection("device_ui").findOne({ _id: deviceId }, { projection: { displayName: 1 } }),
+      require("../email/notify").deviceDisplayName(db, deviceId),
     ]);
     await enqueueEmail(db, {
       to: email,
       template: "deviceInvite",
-      data: { inviterName: inviter?.name || "A ThingsString user", deviceName: ui?.displayName || deviceId, role, token: raw, accountExists: !!invitee },
+      data: { inviterName: inviter?.name || "A ThingsString user", deviceName: ui.name, device: ui.device, role, token: raw, accountExists: !!invitee },
       category: "invite",
       userId: req.user.id,
     });

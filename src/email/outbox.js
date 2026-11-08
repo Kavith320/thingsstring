@@ -17,7 +17,7 @@ const WORKER_ID = `${os.hostname()}:${process.pid}`;
  * Queue an email. `dedupeKey` (optional) makes repeated calls a no-op while the
  * earlier email is still queued or was sent within `dedupeWindowMs`.
  */
-async function enqueueEmail(db, { to, template, data, dedupeKey, dedupeWindowMs = 60e3, category = "security", userId = null, headers = null }) {
+async function enqueueEmail(db, { to, template, data, dedupeKey, dedupeWindowMs = 60e3, category = "security", userId = null, headers = null, attachments = null }) {
   const col = db.collection(COL);
   const now = new Date();
   if (dedupeKey) {
@@ -35,6 +35,7 @@ async function enqueueEmail(db, { to, template, data, dedupeKey, dedupeWindowMs 
     category,
     userId: userId ? String(userId) : null,
     headers: headers || null,
+    attachments: attachments || null, // [{ filename, contentType, content: Buffer }], erased once sent
     status: "pending",
     attempts: 0,
     nextAttemptAt: now,
@@ -79,12 +80,19 @@ async function processOutbox(db, { max = 50, send = sendMail } = {}) {
     const job = await claimNext(col);
     if (!job) break;
     try {
-      const messageId = await send({ to: job.to, subject: job.subject, html: job.html, text: job.text, headers: job.headers || undefined });
+      const messageId = await send({
+        to: job.to,
+        subject: job.subject,
+        html: job.html,
+        text: job.text,
+        headers: job.headers || undefined,
+        attachments: job.attachments || undefined,
+      });
       await col.updateOne(
         { _id: job._id },
         {
           $set: { status: "sent", sentAt: new Date(), messageId, lockedBy: null, lockedUntil: null, lastError: null },
-          $unset: { html: "", text: "" }, // never keep one-time links around
+          $unset: { html: "", text: "", attachments: "" }, // never keep one-time links around
         }
       );
       stats.sent++;
@@ -106,7 +114,7 @@ async function processOutbox(db, { max = 50, send = sendMail } = {}) {
             lockedUntil: null,
             lastError: String(e.message || e).slice(0, 500),
           },
-          ...(giveUp ? { $unset: { html: "", text: "" } } : {}),
+          ...(giveUp ? { $unset: { html: "", text: "", attachments: "" } } : {}),
         }
       );
       console.error(`❌ Email to ${job.to} (${job.template}) failed, attempt ${attempts}${giveUp ? ", giving up" : ""}: ${e.message}`);

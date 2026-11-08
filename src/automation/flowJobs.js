@@ -192,7 +192,7 @@ async function runFlow(db, flowId) {
 /** Email the flow owner that the rule fired (respects their settings and the hourly cap). */
 async function sendFlowEmail(db, flow, { currentValue, actionText }) {
   if (!flow.notify?.email) return { queued: false };
-  const { name } = await deviceDisplayName(db, flow.deviceId, flow.user_id);
+  const { name, device } = await deviceDisplayName(db, flow.deviceId);
   return notifyUser(db, {
     userId: flow.user_id,
     category: "automation",
@@ -201,6 +201,7 @@ async function sendFlowEmail(db, flow, { currentValue, actionText }) {
       flowName: flow.name,
       deviceId: flow.deviceId,
       deviceName: name,
+      device,
       metricPath: flow.metricPath,
       value: currentValue,
       operator: flow.condition?.operator || "changed by >",

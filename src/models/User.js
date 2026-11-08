@@ -35,6 +35,7 @@ const userSchema = new mongoose.Schema(
     notifications: {
       deviceOffline: { type: Boolean, default: true },
       automation: { type: Boolean, default: true },
+      weeklyReport: { type: Boolean, default: true },
     },
 
     preferences: {

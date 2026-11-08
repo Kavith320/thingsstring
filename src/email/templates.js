@@ -37,6 +37,41 @@ function appUrl(pathAndQuery) {
   return `${base}${pathAndQuery}`;
 }
 
+/** The device as the app shows it: { deviceId, name, icon, color }, from data.device or older fields. */
+function dev(data) {
+  const d = data.device || {};
+  const deviceId = d.deviceId || data.deviceId;
+  return { deviceId, name: d.name || data.deviceName || deviceId, icon: d.icon || null, color: d.color || null };
+}
+
+const HEX_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+/**
+ * Device badge: its icon and colour, name, and id. Uploaded icons are embedded
+ * (cid:file-<id>, attached by the mailer); emoji icons are shown as-is; icons from the
+ * app's icon set can't be drawn in an email, so those show the first letter on the
+ * device's colour.
+ */
+function deviceChip(device) {
+  if (!device || !device.deviceId) return "";
+  const color = HEX_RE.test(device.color || "") ? device.color : C.ink;
+  const file = /^file:([a-f0-9]{32})$/.exec(device.icon || "");
+  const emoji = /^emoji:(.+)$/u.exec(device.icon || "");
+  const letter = esc((Array.from(device.name || "?")[0] || "?").toUpperCase());
+
+  const badge = file
+    ? `<img src="cid:file-${file[1]}" width="44" height="44" alt="" style="display:block;border:0;border-radius:12px;width:44px;height:44px;object-fit:cover">`
+    : `<div style="width:44px;height:44px;line-height:44px;border-radius:12px;background:${color};text-align:center;font-family:${FONT};font-size:${emoji ? 22 : 18}px;font-weight:700;color:#ffffff">${emoji ? esc(emoji[1]) : letter}</div>`;
+
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:6px 0 14px;border:1px solid ${C.line};border-radius:12px;background:${C.soft}"><tr>
+    <td style="padding:12px 0 12px 14px;width:44px;vertical-align:middle">${badge}</td>
+    <td style="padding:12px 14px;vertical-align:middle">
+      <div style="font-family:${FONT};font-size:16px;line-height:22px;font-weight:700;color:${C.ink}">${esc(device.name)}</div>
+      <div style="font-family:${MONO};font-size:12px;line-height:18px;color:${C.muted}">ID: ${esc(device.deviceId)}</div>
+    </td>
+  </tr></table>`;
+}
+
 /** Two-column facts table (label, value). Values are HTML (escape user input before passing). */
 function detailsTable(rows) {
   if (!rows || !rows.length) return "";
@@ -67,7 +102,7 @@ function fmtValue(v) {
  * Shared layout. `preheader` is the grey preview line shown in the inbox list.
  * `button` = { label, url }, `notice` = a highlighted box (e.g. security info).
  */
-function layout({ preheader, title, intro, details, button, notice, tone = "info", outro, footerNote, unsubscribeUrl }) {
+function layout({ preheader, title, intro, device, details, button, notice, tone = "info", outro, footerNote, unsubscribeUrl }) {
   const p = (html, extra = "") =>
     `<p style="margin:0 0 14px;font-family:${FONT};font-size:15px;line-height:24px;color:${C.body};${extra}">${html}</p>`;
 
@@ -119,6 +154,7 @@ function layout({ preheader, title, intro, details, button, notice, tone = "info
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td style="padding:32px 32px 28px">
         <h1 style="margin:0 0 18px;font-family:${FONT};font-size:22px;line-height:30px;font-weight:700;letter-spacing:-0.2px;color:${C.ink}">${esc(title)}</h1>
         ${intro.map((x) => p(x)).join("")}
+        ${deviceChip(device)}
         ${detailsTable(details)}
         ${noticeBox}
         ${btn}
@@ -145,6 +181,7 @@ function layout({ preheader, title, intro, details, button, notice, tone = "info
     title,
     "",
     ...intro.map(strip),
+    ...(device ? ["", `Device: ${device.name}${device.name !== device.deviceId ? ` (ID: ${device.deviceId})` : ""}`] : []),
     ...(details && details.length ? ["", ...details.map(([k, v]) => `${k}: ${strip(String(v))}`)] : []),
     ...(notice ? ["", strip(notice)] : []),
     ...(button ? ["", `${button.label}: ${button.url}`] : []),
@@ -225,7 +262,11 @@ const templates = {
 
   /* ───────────── Device alerts (optional, category "deviceOffline") ───────────── */
 
-  deviceOffline: ({ name, deviceId, deviceName, lastSeen, afterMin, timezone, unsubscribeUrl }) => ({
+  deviceOffline: (data) => {
+    const { name, deviceId, lastSeen, afterMin, timezone, unsubscribeUrl } = data;
+    const device = dev(data);
+    const deviceName = device.name;
+    return {
     subject: `⚠️ ${deviceName} is offline`,
     ...layout({
       preheader: `${deviceName} stopped sending data.`,
@@ -234,62 +275,98 @@ const templates = {
         `Hi ${esc(name)},`,
         `<b>${esc(deviceName)}</b> hasn't sent any data${afterMin ? ` for more than ${esc(afterMin)} minutes` : ""}. Automations and schedule start actions for it are paused until it reconnects.`,
       ],
-      details: [
-        ["Device", esc(deviceName) + (deviceName !== deviceId ? ` <span style="color:${C.muted}">(${esc(deviceId)})</span>` : "")],
-        ["Last seen", lastSeen ? esc(fmtTime(lastSeen, timezone)) : "Never"],
-      ],
+      device,
+      details: [["Last seen", lastSeen ? esc(fmtTime(lastSeen, timezone)) : "Never"]],
       notice: "Check its power and Wi-Fi. We'll email you again when it's back online.",
       tone: "warn",
-      button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(deviceId)}`) },
+      button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(device.deviceId)}`) },
       unsubscribeUrl,
       footerNote: "You get this because you turned on offline alerts for this device.",
     }),
-  }),
+    };
+  },
 
-  deviceOnline: ({ name, deviceId, deviceName, offlineSince, timezone, unsubscribeUrl }) => ({
+  deviceOnline: (data) => {
+    const { name, deviceId, offlineSince, timezone, unsubscribeUrl } = data;
+    const device = dev(data);
+    const deviceName = device.name;
+    return {
     subject: `✅ ${deviceName} is back online`,
     ...layout({
       preheader: `${deviceName} reconnected.`,
       title: `${deviceName} is back online`,
       intro: [`Hi ${esc(name)},`, `Good news: <b>${esc(deviceName)}</b> is sending data again.`],
+      device,
       details: [
-        ["Device", esc(deviceName)],
         ...(offlineSince ? [["Offline since", esc(fmtTime(offlineSince, timezone))]] : []),
         ["Back at", esc(fmtTime(new Date(), timezone))],
       ],
       tone: "ok",
-      button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(deviceId)}`) },
+      button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(device.deviceId)}`) },
       unsubscribeUrl,
       footerNote: "You get this because you turned on offline alerts for this device.",
     }),
-  }),
+    };
+  },
 
   /* ───────────── Automation (optional, category "automation") ───────────── */
 
-  automationTriggered: ({ name, flowName, deviceId, deviceName, metricPath, value, operator, target, actionText, timezone, unsubscribeUrl }) => ({
+  automationTriggered: (data) => {
+    const { name, flowName, deviceId, metricPath, value, operator, target, actionText, timezone, unsubscribeUrl } = data;
+    const device = dev(data);
+    const deviceName = device.name;
+    return {
     subject: `🔔 ${flowName}: ${metricPath} is ${fmtValue(value)}`,
     ...layout({
       preheader: `${deviceName}: ${metricPath} ${operator} ${fmtValue(target)}`,
       title: `Automation "${flowName}" triggered`,
       intro: [`Hi ${esc(name)},`, `Your automation rule's condition was met.`],
+      device,
       details: [
-        ["Device", esc(deviceName)],
         ["Reading", `${esc(metricPath)} = <b>${esc(fmtValue(value))}</b>`],
         ["Condition", `${esc(metricPath)} ${esc(operator)} ${esc(fmtValue(target))}`],
         ["Action", actionText ? esc(actionText) : `<span style="color:${C.muted}">Email only</span>`],
         ["Time", esc(fmtTime(new Date(), timezone))],
       ],
       tone: "info",
-      button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(deviceId)}`) },
+      button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(device.deviceId)}`) },
       outro: ["You'll get at most one email per rule every 15 minutes."],
       unsubscribeUrl,
       footerNote: "You get this because the rule has \"Email me\" turned on.",
+    }),
+    };
+  },
+
+  /* ───────────── Weekly report (optional, category "weeklyReport") ───────────── */
+
+  weeklyReport: ({ name, period, devices = [], timezone, unsubscribeUrl }) => ({
+    subject: `Your ${BRAND} weekly report`,
+    ...layout({
+      preheader: `${devices.length} device${devices.length === 1 ? "" : "s"} · ${period}`,
+      title: "Your weekly report",
+      intro: [
+        `Hi ${esc(name)},`,
+        `Here's what happened on your devices this week (${esc(period)}). The attached Excel file has a summary sheet and one sheet per device with all activity and daily readings.`,
+      ],
+      details: devices.map((d) => [
+        d.name,
+        `${esc(d.readings.toLocaleString("en-US"))} readings · ${esc(d.events)} events · ${esc(d.role)}<br><span style="color:${C.muted};font-size:12px">ID: ${esc(d.deviceId)} · last data ${
+          d.lastSeen ? esc(fmtTime(d.lastSeen, timezone)) : "never"
+        }</span>`,
+      ]),
+      notice: "Sent every week just before the platform's weekly backup.",
+      button: { label: "Open dashboard", url: appUrl("/dashboard") },
+      unsubscribeUrl,
+      footerNote: "You get this because weekly reports are on in your settings.",
     }),
   }),
 
   /* ───────────── Sharing ───────────── */
 
-  deviceInvite: ({ inviterName, deviceName, role, token, accountExists }) => {
+  deviceInvite: (data) => {
+    const { inviterName, role, token, accountExists } = data;
+    const device = dev(data);
+    const deviceName = device.name;
     const url = appUrl(`/invite?token=${encodeURIComponent(token)}`);
     const can = {
       viewer: "see its live data, graphs and history",
@@ -302,8 +379,8 @@ const templates = {
         preheader: `You've been invited as ${role}. The invitation is valid for 7 days.`,
         title: `You're invited to "${deviceName}"`,
         intro: [`Hi,`, `<b>${esc(inviterName)}</b> invited you to the device <b>${esc(deviceName)}</b> on ${BRAND}, the IoT platform for monitoring and controlling connected devices.`],
+        device,
         details: [
-          ["Device", esc(deviceName)],
           ["Your role", `${esc(role.charAt(0).toUpperCase() + role.slice(1))} <span style="color:${C.muted}">(you can ${can})</span>`],
           ["Invited by", esc(inviterName)],
         ],
@@ -319,42 +396,60 @@ const templates = {
 
   /* ───────────── Admin actions (category "account", always sent) ───────────── */
 
-  deviceLocked: ({ name, deviceId, deviceName, reason }) => ({
+  deviceLocked: (data) => {
+    const { name, reason } = data;
+    const device = dev(data);
+    const deviceName = device.name;
+    return {
     subject: `${deviceName} was locked by an administrator`,
     ...layout({
       preheader: "Your device was locked by an administrator.",
       title: "Your device was locked",
       intro: [`Hi ${esc(name)},`, `An administrator locked <b>${esc(deviceName)}</b>. While it's locked, controls, automations and schedules can't change it.`],
-      details: [["Device", esc(deviceName)], ["Reason", esc(reason || "Not given")]],
+      device,
+      details: [["Reason", esc(reason || "Not given")]],
       tone: "warn",
       notice: "If you think this is a mistake, reply to this email.",
       footerNote: "This is a notice about your account and can't be turned off.",
     }),
-  }),
+    };
+  },
 
-  deviceUnlocked: ({ name, deviceId, deviceName }) => ({
+  deviceUnlocked: (data) => {
+    const { name, deviceId } = data;
+    const device = dev(data);
+    const deviceName = device.name;
+    return {
     subject: `${deviceName} was unlocked`,
     ...layout({
       preheader: "Your device can be controlled again.",
       title: "Your device was unlocked",
       intro: [`Hi ${esc(name)},`, `<b>${esc(deviceName)}</b> was unlocked by an administrator. Controls, automations and schedules work again.`],
+      device,
       tone: "ok",
-      button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(deviceId)}`) },
+      button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(device.deviceId)}`) },
       footerNote: "This is a notice about your account and can't be turned off.",
     }),
-  }),
+    };
+  },
 
-  deviceTransferredAway: ({ name, deviceId, deviceName }) => ({
+  deviceTransferredAway: (data) => {
+    const { name, deviceId } = data;
+    const device = dev(data);
+    const deviceName = device.name;
+    return {
     subject: `${deviceName} was removed from your account`,
     ...layout({
       preheader: "A device was moved to another account.",
       title: "A device was removed from your account",
-      intro: [`Hi ${esc(name)},`, `An administrator moved <b>${esc(deviceName)}</b> (${esc(deviceId)}) to another account. Your automations and schedules for it were removed.`],
+      intro: [`Hi ${esc(name)},`, `An administrator moved <b>${esc(deviceName)}</b> to another account. Your automations and schedules for it were removed.`],
+      device,
       notice: "If you didn't expect this, reply to this email.",
       tone: "warn",
       footerNote: "This is a notice about your account and can't be turned off.",
     }),
-  }),
+    };
+  },
 
   deviceTransferredIn: ({ name, deviceId }) => ({
     subject: `A device was added to your ${BRAND} account`,
@@ -362,6 +457,7 @@ const templates = {
       preheader: `Device ${deviceId} is now yours.`,
       title: "A device was added to your account",
       intro: [`Hi ${esc(name)},`, `An administrator moved device <b>${esc(deviceId)}</b> to your account. It now appears in your dashboard.`],
+      device: { deviceId, name: deviceId },
       tone: "ok",
       button: { label: "Open device", url: appUrl(`/devices/${encodeURIComponent(deviceId)}`) },
       footerNote: "This is a notice about your account and can't be turned off.",

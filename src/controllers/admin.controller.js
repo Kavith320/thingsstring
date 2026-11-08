@@ -81,6 +81,21 @@ async function removePersonalisation(db, { userId, deviceIds = [] }) {
   }
 }
 
+// POST /api/admin/maintenance/weekly-report  { userId? }  — send the weekly report now
+// (to one user when userId is given, e.g. to check it before Sunday)
+async function triggerWeeklyReport(req, res) {
+  try {
+    const { userId } = req.body || {};
+    if (userId !== undefined && !parseObjectId(userId)) return badUserId(res);
+    const { sendWeeklyReports } = require("../services/weeklyReport");
+    const result = await sendWeeklyReports(getDb(), { onlyUserId: userId || null });
+    await audit(req, "WEEKLY_REPORT_TRIGGER", userId || "all", result);
+    return res.json({ ok: true, ...result });
+  } catch (e) {
+    return sendServerError(res, e, "admin weekly report");
+  }
+}
+
 // GET /api/admin/email/stats — free-tier quota usage
 async function getEmailStats(req, res) {
   try {
@@ -425,12 +440,12 @@ async function toggleDeviceLockout(req, res) {
     await logActivity(getDb(), { deviceId, actor: actorFromReq(req, "admin"), action: isDisabled ? "admin.lock" : "admin.unlock", details: { reason: disabledReason } });
     if (!!device.isDisabled !== isDisabled) {
       const ownerId = device.device?.user_id || device.user_id;
-      const { name } = await deviceDisplayName(getDb(), deviceId, ownerId);
+      const { name, device: dev } = await deviceDisplayName(getDb(), deviceId);
       await notifyUser(getDb(), {
         userId: ownerId,
         category: "account",
         template: isDisabled ? "deviceLocked" : "deviceUnlocked",
-        data: { deviceId, deviceName: name, reason: disabledReason },
+        data: { deviceId, deviceName: name, device: dev, reason: disabledReason },
       });
     }
     return res.json({
@@ -567,7 +582,7 @@ async function transferDeviceOwnership(req, res) {
 
     const previousOwnerId = device.device?.user_id || null;
     const newOwnerId = String(targetUser._id);
-    const oldName = previousOwnerId ? (await deviceDisplayName(db, deviceId, previousOwnerId)).name : deviceId;
+    const before = await deviceDisplayName(db, deviceId); // read before the transfer clears the settings
 
     // Both owner fields are set; the MQTT ingest keeps them even when the device reboots
     await configCol.updateOne(
@@ -583,7 +598,7 @@ async function transferDeviceOwnership(req, res) {
 
     if (previousOwnerId !== newOwnerId) {
       if (previousOwnerId) {
-        await notifyUser(db, { userId: previousOwnerId, category: "account", template: "deviceTransferredAway", data: { deviceId, deviceName: oldName } });
+        await notifyUser(db, { userId: previousOwnerId, category: "account", template: "deviceTransferredAway", data: { deviceId, deviceName: before.name, device: before.device } });
       }
       await notifyUser(db, { userId: newOwnerId, category: "account", template: "deviceTransferredIn", data: { deviceId } });
     }
@@ -749,6 +764,7 @@ async function getAuditLogs(req, res) {
 
 module.exports = {
   getEmailStats,
+  triggerWeeklyReport,
   getSystemStats,
   getAllUsers,
   deleteUser,
