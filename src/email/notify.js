@@ -126,9 +126,9 @@ async function notifyUser(db, { userId, category, deviceId = null, template, dat
   }
 }
 
-/** The name this user gave the device on their dashboard, or its id. */
-async function deviceDisplayName(db, deviceId, userId) {
-  const ui = await db.collection("device_ui").findOne({ _id: `${userId}:${deviceId}` }, { projection: { displayName: 1 } });
+/** The device's display name (shared by everyone it's shared with), or its id. */
+async function deviceDisplayName(db, deviceId) {
+  const ui = await db.collection("device_ui").findOne({ _id: deviceId }, { projection: { displayName: 1 } });
   return { name: ui?.displayName || deviceId };
 }
 

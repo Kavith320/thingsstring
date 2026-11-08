@@ -202,7 +202,7 @@ test("removing a member cuts access everywhere and pauses their schedules and ru
   await call(mgr, "PUT", "/api/devices/d1/alerts", { offline: { enabled: true, afterMin: 5 } });
 
   assert.equal((await call(owner, "GET", "/api/schedules/devices/d1/schedules")).body.count, 1, "owner sees the manager's schedule");
-  assert.equal((await call(owner, "GET", "/api/devices/d1/ui")).body.ui.displayName, null, "personal settings stay personal");
+  assert.equal((await call(owner, "GET", "/api/devices/d1/ui")).body.ui.displayName, "Mgr's name", "device settings are shared");
 
   assert.equal((await call(owner, "DELETE", `/api/devices/d1/members/${mgr.id}`)).status, 200);
   assert.equal((await call(mgr, "GET", "/api/devices/d1")).status, 404);
@@ -212,7 +212,7 @@ test("removing a member cuts access everywhere and pauses their schedules and ru
   assert.equal(sched.disabledReason, "access removed");
   assert.equal((await db.collection("automation_flows").findOne({})).enabled, false);
   assert.equal(await db.collection("device_alerts").countDocuments(), 0);
-  assert.equal(await db.collection("device_ui").countDocuments({ user_id: mgr.id }), 0);
+  assert.equal((await call(owner, "GET", "/api/devices/d1/ui")).body.ui.displayName, "Mgr's name", "device settings stay with the device");
 
   // even if re-enabled directly, the rule can't run without access
   await db.collection("automation_flows").updateOne({}, { $set: { enabled: true } });

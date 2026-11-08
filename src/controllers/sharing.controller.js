@@ -110,7 +110,7 @@ async function createInvite(req, res) {
 
     const [inviter, ui] = await Promise.all([
       db.collection("users").findOne({ _id: new ObjectId(req.user.id) }, { projection: { name: 1 } }),
-      db.collection("device_ui").findOne({ _id: `${req.user.id}:${deviceId}` }, { projection: { displayName: 1 } }),
+      db.collection("device_ui").findOne({ _id: deviceId }, { projection: { displayName: 1 } }),
     ]);
     await enqueueEmail(db, {
       to: email,

@@ -38,7 +38,7 @@ async function listMyDevices(req, res) {
     const [controls, telemetry, uiById] = await Promise.all([
       db.collection("device_control").find({ _id: { $in: ids } }).toArray(),
       Promise.all(ids.map((id) => latestTelemetry(db, id))),
-      loadUiMap(db, req.user.id, ids),
+      loadUiMap(db, ids),
     ]);
     const controlById = new Map(controls.map((c) => [c._id, c]));
 
@@ -72,7 +72,7 @@ async function getDeviceById(req, res) {
     const [lastTelemetry, control, ui] = await Promise.all([
       latestTelemetry(db, deviceId),
       db.collection("device_control").findOne({ _id: deviceId }),
-      db.collection("device_ui").findOne({ _id: `${req.user.id}:${deviceId}` }),
+      db.collection("device_ui").findOne({ _id: deviceId }),
     ]);
 
     return res.json({
