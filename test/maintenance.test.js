@@ -25,11 +25,11 @@ test("ensureIndexes is idempotent and TTL retention can be changed in place", as
   await ensureIndexes(db); // second run must not throw
 
   await ensureTtlIndex(db, "device_telemetry", "createdAt", 30 * 86400); // was IndexOptionsConflict
-  let ttl = (await db.collection("device_telemetry").indexes()).find((i) => i.key.createdAt);
+  let ttl = (await db.collection("device_telemetry").indexes()).find((i) => i.expireAfterSeconds !== undefined && i.key.createdAt);
   assert.equal(ttl.expireAfterSeconds, 30 * 86400);
 
   await ensureIndexes(db); // startup must not undo an admin-chosen retention
-  ttl = (await db.collection("device_telemetry").indexes()).find((i) => i.key.createdAt);
+  ttl = (await db.collection("device_telemetry").indexes()).find((i) => i.expireAfterSeconds !== undefined && i.key.createdAt);
   assert.equal(ttl.expireAfterSeconds, 30 * 86400);
 });
 

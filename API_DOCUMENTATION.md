@@ -140,6 +140,39 @@ Example: `GET /api/devices/device_123/telemetry?from=2026-11-07T10:00:00Z&to=202
 
 `downsampled` is `false` and `bucketMs` is `null` when raw documents are returned. `retentionDays` is how long telemetry is kept (older readings no longer exist), so a "30d" or "All" view can never show more than this.
 
+### Download Telemetry as CSV
+`GET /api/devices/:deviceId/telemetry/export`
+
+Downloads the device's raw readings as a CSV file, **oldest first**.
+
+| Param | Required | Description |
+|---|---|---|
+| `from` | no | Start (ISO 8601 or epoch ms). Omit to export everything still stored (see `retentionDays`). |
+| `to` | no | End, same formats. Defaults to now. |
+
+- Columns: `createdAt` (ISO, UTC) first, then every field the device has ever sent in the range, sorted by name. Nested objects become dotted columns (`actuators.relay1.state`); arrays are written as JSON. A reading without a field leaves that cell empty.
+- The file is UTF-8 with a BOM, so it opens correctly in Excel. Text cells that start with `=`, `+`, `-` or `@` get a leading `'` so spreadsheets never run them as formulas.
+- Response headers: `Content-Type: text/csv; charset=utf-8` and `Content-Disposition: attachment; filename="<deviceId>_telemetry_<time>.csv"`.
+- Errors are JSON: `400` (bad dates), `401`, `404` (not your device), `429` (more than 10 exports per user in 10 minutes).
+
+The endpoint needs the `Authorization` header, so a plain `<a href>` link won't work. Download it with `fetch`:
+
+```js
+async function downloadCsv(deviceId, token, { from, to } = {}) {
+  const qs = new URLSearchParams();
+  if (from) qs.set("from", new Date(from).toISOString());
+  if (to) qs.set("to", new Date(to).toISOString());
+  const res = await fetch(`${API}/api/devices/${deviceId}/telemetry/export?${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error((await res.json()).error);
+  const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition"))?.[1] || "telemetry.csv";
+  const url = URL.createObjectURL(await res.blob());
+  Object.assign(document.createElement("a"), { href: url, download: name }).click();
+  URL.revokeObjectURL(url);
+}
+```
+
 ### Update Device Control (Command)
 `POST /api/devices/:deviceId/control`
 Updates the desired state of actuators on a device.

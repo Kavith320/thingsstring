@@ -4,6 +4,7 @@ const { publishControl } = require("../services/controlPublisher");
 const { findOwnedDevice } = require("../services/deviceState");
 const { sendServerError, isPlainObject, isSafeKey, clampInt } = require("../utils/http");
 const { TELEMETRY_TTL_DAYS } = require("../db/indexes");
+const { streamTelemetryCsv } = require("../services/telemetryCsv");
 
 async function latestTelemetry(db, deviceId) {
   return db.collection("device_telemetry").findOne({ deviceId }, { sort: { _id: -1 } });
@@ -200,6 +201,53 @@ async function getDeviceTelemetry(req, res) {
   }
 }
 
+/** Validate optional from/to query params. Returns { error } or { from, to } (either may be null). */
+function parseRange(query) {
+  const out = { from: null, to: null };
+  for (const k of ["from", "to"]) {
+    if (query[k] === undefined) continue;
+    out[k] = parseTime(query[k]);
+    if (!out[k]) return { error: `Invalid '${k}' date (use ISO 8601 or epoch ms)` };
+  }
+  if (out.from && out.to && out.from > out.to) return { error: "'from' must be before 'to'" };
+  return out;
+}
+
+// GET /api/devices/:deviceId/telemetry/export[?from=<date>][&to=<date>]
+// Downloads every stored reading (or a range) as CSV, oldest first.
+async function exportDeviceTelemetryCsv(req, res) {
+  const { deviceId } = req.params;
+  try {
+    const db = getDb();
+    const range = parseRange(req.query);
+    if (range.error) return res.status(400).json({ ok: false, error: range.error });
+
+    const config = await findOwnedDevice(db, deviceId, req.user.id);
+    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
+
+    // Fix the end now so both passes see the same rows even while new telemetry arrives.
+    const to = range.to || new Date();
+    const createdAt = { $lte: to };
+    if (range.from) createdAt.$gte = range.from;
+
+    const safeId = String(deviceId).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64) || "device";
+    const stamp = to.toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    res.status(200).set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${safeId}_telemetry_${stamp}.csv"`,
+      "Cache-Control": "no-store",
+    });
+
+    const result = await streamTelemetryCsv(db.collection("device_telemetry"), { deviceId, createdAt }, res);
+    if (result.truncated) console.warn(`⚠️ CSV export for ${deviceId} hit the column limit`);
+    return res.end();
+  } catch (e) {
+    if (!res.headersSent) return sendServerError(res, e, "export telemetry");
+    console.error(`❌ CSV export for ${deviceId} failed mid-stream:`, e);
+    return res.destroy(e); // the client sees a failed download, not a silently cut-off file
+  }
+}
+
 /**
  * Validate an `actuators` patch against a device config and build the $set.
  * Returns { error } or { $set }. Shared by the user and admin control endpoints.
@@ -263,6 +311,7 @@ module.exports = {
   listMyDevices,
   getDeviceById,
   getDeviceTelemetry,
+  exportDeviceTelemetryCsv,
   updateDeviceControl,
   buildControlSet,
 };
