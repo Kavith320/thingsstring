@@ -7,6 +7,9 @@ const { connectMongo, closeMongo } = require("../db/mongo");
 const { createAgenda } = require("./agenda");
 const { defineJobs } = require("./jobs");
 const { startScheduleSync } = require("./scheduleSync");
+const { getDb } = require("../db/mongo");
+const { startOutboxLoop } = require("../email/outbox");
+const { verifyMailer, closeMailer } = require("../email/mailer");
 
 async function startWorker() {
   await connectMongo();
@@ -21,11 +24,17 @@ async function startWorker() {
   console.log("📅 Scheduled automatic weekly backup (Every Sunday at 02:00)");
 
   const timer = await startScheduleSync(agenda, { intervalMs: 5000 });
+
+  // 📧 Email sender: drains email_outbox (queued by the API)
+  await verifyMailer();
+  const stopOutbox = startOutboxLoop(getDb(), { intervalMs: 5000 });
   console.log("🧠 Scheduler worker started");
 
   async function graceful() {
     console.log("🧠 Scheduler worker shutting down...");
     clearInterval(timer);
+    stopOutbox();
+    closeMailer();
     await agenda.stop();
     await agenda.close();
     await closeMongo();

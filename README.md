@@ -7,7 +7,7 @@ IoT backend: REST API, MQTT device gateway, schedules and automation rules, on M
 | Process | Production command | Role |
 |---|---|---|
 | API | `npm start` | REST API. **The only process that talks to MQTT**: stores device config/telemetry and publishes `device_control` changes to `ts/<id>/control`. |
-| Scheduler | `npm run start:worker` | Runs schedules and the weekly backup + telemetry cleanup. Writes `device_control` only. |
+| Scheduler | `npm run start:worker` | Runs schedules and the weekly backup + telemetry cleanup, and **sends queued emails** (`email_outbox`). Writes `device_control` only. |
 | Automation | `npm run start:automation` | Evaluates automation flows. Writes `device_control` only. |
 
 Run exactly **one** API process. The workers need the API running to reach devices.
@@ -21,6 +21,15 @@ cp .env.example .env   # fill it in
 node scripts/create-admin.js you@example.com 'a-long-unique-password'
 npm start
 ```
+
+## Email (Brevo)
+
+1. In Brevo: add and authenticate the domain `thingsstring.com` (copy the DNS records it shows into your DNS, "DNS only"), then create an SMTP key under **SMTP & API**.
+2. Put the `SMTP_*`, `MAIL_FROM`, `MAIL_REPLY_TO` and `APP_URL` lines from `.env.example` into `.env` on the server.
+3. `npm run email:test -- you@example.com` sends one test email directly.
+4. `pm2 restart thingsstring-scheduler --update-env`. The scheduler sends queued emails every 5 s; its log shows `📧 SMTP ready` or the error.
+
+Emails are queued in `email_outbox` and retried after 1, 5 and 30 minutes. The message body is erased once sent, and rows are deleted after 30 days. Failed rows keep `lastError`.
 
 ## Tests
 

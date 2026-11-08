@@ -3,6 +3,7 @@ const { requireAuth } = require("../middleware/auth.middleware");
 const { rateLimit } = require("../middleware/rateLimit");
 const { MAX_IMAGE_BYTES } = require("../services/fileStore");
 const c = require("../controllers/profile.controller");
+const { requestEmailChange } = require("../controllers/email.controller");
 
 const router = express.Router();
 const MIN = 60 * 1000;
@@ -17,6 +18,8 @@ router.get("/", requireAuth, c.getProfile);
 router.patch("/", requireAuth, c.updateProfile);
 router.patch("/preferences", requireAuth, c.updatePreferences);
 router.put("/password", requireAuth, passwordLimit, c.changePassword);
+const emailChangeLimit = rateLimit({ windowMs: 60 * MIN, max: 5, key: byUser("email-change") });
+router.post("/email", requireAuth, emailChangeLimit, requestEmailChange);
 router.put("/avatar", requireAuth, uploadLimit, rawImage, c.uploadAvatar);
 router.delete("/avatar", requireAuth, c.removeAvatar);
 

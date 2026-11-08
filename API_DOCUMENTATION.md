@@ -67,6 +67,31 @@ All private routes require a `Bearer <token>` in the `Authorization` header.
 `GET /api/auth/me`
 Requires Authorization Header.
 
+### Email-based account operations
+
+Emails contain links to the **frontend**, built from `APP_URL`. The frontend page reads `token` from the URL and calls the API:
+
+| Link in the email | Frontend page calls |
+|---|---|
+| `APP_URL/verify-email?token=…` | `POST /api/auth/verify-email` `{ token }` |
+| `APP_URL/reset-password?token=…` | `POST /api/auth/reset-password` `{ token, newPassword }` |
+| `APP_URL/confirm-email?token=…` | `POST /api/auth/confirm-email` `{ token }` |
+
+These three calls need **no login**: the link may be opened on another device. An invalid, expired or already-used link returns `400` with a message to show.
+
+| Endpoint | Login | Body | Notes |
+|---|:-:|---|---|
+| `POST /api/auth/verify-email/send` | ✅ | — | Resends the verification email (5/hour). `400` if already verified. |
+| `POST /api/auth/verify-email` | — | `{ token }` | Returns `{ ok, user }`, with `user.emailVerified: true`. The link is valid 24 h and works once. |
+| `POST /api/auth/forgot-password` | — | `{ email }` | **Always** returns the same `200` message, whether the account exists or not. Limited to 3/hour per email. |
+| `POST /api/auth/reset-password` | — | `{ token, newPassword }` | The link is valid 30 min and works once. **All sessions are logged out.** Returns `{ ok, token, user }`, so the user is signed in straight away: store the new `token`. |
+| `POST /api/me/email` | ✅ | `{ newEmail, currentPassword }` | Sends a confirmation link to the new address. The email doesn't change until it's clicked. `409` if the address is taken. Google-only accounts must set a password first. |
+| `POST /api/auth/confirm-email` | — | `{ token }` | Switches to the new email and tells the old address. Returns `{ ok, user }`. |
+
+- Login, register, Google and `/api/me` responses include `emailVerified`. Show a "please verify your email" banner with a **Resend** button while it is `false`.
+- Some later features (e.g. device sharing) will answer `403 { code: "EMAIL_NOT_VERIFIED" }` for unverified users.
+- Security notices are sent automatically when a password changes (from settings or a reset) and when the email changes.
+
 ---
 
 ## 2. Device Management
