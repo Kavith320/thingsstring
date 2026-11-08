@@ -4,7 +4,8 @@
 
 const { getDb } = require("../db/mongo");
 const { getDeviceStatus } = require("../services/deviceState");
-const { serializeUi, validateUiPatch, uiId } = require("../services/deviceUi");
+const { serializeUi, validateUiPatch, iconRefsIn } = require("../services/deviceUi");
+const { logActivity, actorFromReq } = require("../services/activity");
 const { requireDeviceRole, accessibleDevices } = require("../services/deviceAccess");
 const { saveImage, deleteFiles } = require("../services/fileStore");
 const { sendServerError, parseObjectId, isPlainObject } = require("../utils/http");
@@ -39,30 +40,37 @@ async function getDeviceUi(req, res) {
     const { deviceId } = req.params;
     const access = await requireDeviceRole(db, deviceId, req.user.id, "viewer");
     if (access.error) return notFound(res);
-    const doc = await db.collection("device_ui").findOne({ _id: uiId(req.user.id, deviceId) });
-    return res.json({ ok: true, deviceId, ui: serializeUi(doc) });
+    const doc = await db.collection("device_ui").findOne({ _id: deviceId });
+    return res.json({ ok: true, deviceId, role: access.role, canEdit: ["owner", "manager"].includes(access.role), ui: serializeUi(doc) });
   } catch (e) {
     return handle(res, e, "get device ui");
   }
 }
 
-// PATCH /api/devices/:deviceId/ui
+// PATCH /api/devices/:deviceId/ui   (owner or manager; everyone with access sees the result)
 async function updateDeviceUi(req, res) {
   try {
     const db = getDb();
     const { deviceId } = req.params;
-    const access = await requireDeviceRole(db, deviceId, req.user.id, "viewer");
-    if (access.error) return notFound(res);
+    const access = await requireDeviceRole(db, deviceId, req.user.id, "manager");
+    if (access.error) {
+      return access.status === 404 ? notFound(res) : res.status(403).json({ ok: false, error: access.error, code: access.code });
+    }
 
     const { $set, iconRefs } = validateUiPatch(req.body);
-    await assertOwnFiles(db, req.user.id, iconRefs, "icon");
+    // New uploaded icons must be the editor's own; icons already on the device may stay
+    // (e.g. a manager renaming a device whose icon the owner uploaded)
+    const col = db.collection("device_ui");
+    const current = await col.findOne({ _id: deviceId });
+    const kept = iconRefsIn(current);
+    await assertOwnFiles(db, req.user.id, iconRefs.filter((r) => !kept.has(r.value)), "icon");
 
-    // Personal to this user: every member of a shared device has their own settings
-    const doc = await db.collection("device_ui").findOneAndUpdate(
-      { _id: uiId(req.user.id, deviceId) },
-      { $set: { ...$set, deviceId, user_id: req.user.id, updatedAt: new Date() } },
+    const doc = await col.findOneAndUpdate(
+      { _id: deviceId },
+      { $set: { ...$set, deviceId, updatedBy: req.user.id, updatedAt: new Date() } },
       { upsert: true, returnDocument: "after" }
     );
+    await logActivity(db, { deviceId, actor: actorFromReq(req), action: "settings.update", details: { changed: Object.keys($set) } });
     return res.json({ ok: true, deviceId, ui: serializeUi(doc) });
   } catch (e) {
     return handle(res, e, "update device ui");
@@ -73,12 +81,11 @@ async function updateDeviceUi(req, res) {
 async function getDeviceMap(req, res) {
   try {
     const db = getDb();
-    const uiDocs = await db
-      .collection("device_ui")
-      .find({ user_id: req.user.id, location: { $ne: null } })
-      .toArray();
     const roles = await accessibleDevices(db, req.user.id);
-    const mine = uiDocs.filter((d) => roles.has(d.deviceId));
+    const mine = await db
+      .collection("device_ui")
+      .find({ _id: { $in: [...roles.keys()] }, location: { $ne: null } })
+      .toArray();
     const statuses = await Promise.all(mine.map((d) => getDeviceStatus(db, d.deviceId)));
 
     const devices = mine.map((d, i) => ({

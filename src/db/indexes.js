@@ -67,7 +67,6 @@ async function ensureIndexes(db) {
     db.collection("device_schedules").createIndex({ enabled: 1 }),
 
     // Personalisation
-    db.collection("device_ui").createIndex({ user_id: 1, deviceId: 1 }),
     db.collection("device_ui").createIndex({ deviceId: 1 }),
     db.collection("device_groups").createIndex({ user_id: 1, order: 1 }),
     db.collection("device_groups").createIndex({ deviceIds: 1 }),

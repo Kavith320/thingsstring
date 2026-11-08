@@ -16,9 +16,11 @@ All `/api/...` routes need `Authorization: Bearer <token>` unless marked **no lo
 | | Viewer | Operator | Manager | Owner |
 |---|:-:|:-:|:-:|:-:|
 | See the device, live data, graphs, map, CSV export | ✅ | ✅ | ✅ | ✅ |
-| Own name/icon/colour, own groups, own offline alerts | ✅ | ✅ | ✅ | ✅ |
+| See the device's name, icon, colour, value layout and location (same for everyone) | ✅ | ✅ | ✅ | ✅ |
+| Own offline alerts, own groups and dashboard layout | ✅ | ✅ | ✅ | ✅ |
 | Switch actuators (`POST /control`) | | ✅ | ✅ | ✅ |
 | Schedules and automations that switch this device | | | ✅ | ✅ |
+| **Change the device's name, icon, colour, value layout and location** | | | ✅ | ✅ |
 | See members, invite or remove viewers and operators, activity history | | | ✅ | ✅ |
 | Invite or remove managers, change any role | | | | ✅ |
 
@@ -67,7 +69,7 @@ All `/api/...` routes need `Authorization: Bearer <token>` unless marked **no lo
 **When someone is removed or leaves:**
 - Their access ends everywhere immediately.
 - Their schedules and automation rules on that device are **disabled, not deleted**, with `disabledReason`.
-- Their alerts, personal settings and group membership for the device are removed.
+- Their alert settings and group membership for the device are removed. The device's display settings stay, because they belong to the device.
 
 ---
 
@@ -96,7 +98,17 @@ The email links to `APP_URL/invite?token=…`. Build this page:
 
 ---
 
-## 4. Offline alerts per device (device settings → "Alerts")
+## 4. Shared vs personal settings
+
+| Shared by everyone with access (owner and managers edit) | Personal to each user |
+|---|---|
+| Device name, description, icon, colour | Offline email alerts (on/off, delay) |
+| Which sensor/actuator values are visible or pinned, their order, labels, units, icons | Device groups |
+| Location on the map | Dashboard layout, profile, theme |
+
+`GET /api/devices/:id/ui` returns `canEdit`. When it's `false` (viewer or operator), show the settings read-only. `PATCH /api/devices/:id/ui` returns `403` for them.
+
+## 5. Offline alerts per device (device settings → "Alerts")
 
 Settings are **personal**: each member decides for themselves. They're **off by default**.
 
@@ -122,7 +134,7 @@ PUT /api/devices/:deviceId/alerts
 
 ---
 
-## 5. Activity history (manager+)
+## 6. Activity history (manager+)
 
 `GET /api/devices/:deviceId/activity?limit=50&before=<ISO>&action=<prefix>`
 ```json
@@ -135,14 +147,14 @@ PUT /api/devices/:deviceId/alerts
     "details": { "actuators": { "relay1": { "value": true } }, "reading": { "temperature": 41.2 } } } ] }
 ```
 - **Actors:** `user`, `admin`, `automation` (with the rule name) or `schedule` (with the schedule name).
-- **Actions:** `control.update`, `schedule.create|update|delete`, `automation.create|update|delete`, `share.invite|accept|decline|role|remove|leave|invite.cancel`, `telemetry.export`, `admin.lock|unlock`.
+- **Actions:** `settings.update`, `control.update`, `schedule.create|update|delete`, `automation.create|update|delete`, `share.invite|accept|decline|role|remove|leave|invite.cancel`, `telemetry.export`, `admin.lock|unlock`.
 - **Paging:** pass `nextBefore` as `before` to load older entries.
 - **Filtering:** `action=share` returns only sharing events.
 - History is kept for **90 days** (`ACTIVITY_TTL_DAYS`).
 
 ---
 
-## 6. Schedules on shared devices
+## 7. Schedules on shared devices
 - `GET /api/schedules/devices/:id/schedules` lists **all** schedules on the device, from every member. Every role can see them, so people can tell who scheduled what (`user_id`).
 - Managers and the owner can create, edit and delete any schedule on the device.
 - A disabled schedule may have `disabledReason` (e.g. "access removed"). Turning it back on (`enabled: true`) clears it.

@@ -69,7 +69,8 @@ function canManageRole(actorRole, targetRole) {
 /**
  * Remove a user's access to devices and everything that depended on it:
  * their schedules and automation rules on those devices are disabled (not deleted,
- * so they can be restored), alert subscriptions and personal dashboard settings removed.
+ * so they can be restored); their alert settings and group membership are removed.
+ * (Device display settings are shared by the device and stay.)
  */
 async function cleanupUserDeviceAccess(db, userId, deviceIds, reason) {
   const uid = String(userId);
@@ -78,7 +79,6 @@ async function cleanupUserDeviceAccess(db, userId, deviceIds, reason) {
   await Promise.all([
     db.collection("device_access").deleteMany({ userId: uid, deviceId: { $in: deviceIds } }),
     db.collection("device_alerts").deleteMany({ userId: uid, deviceId: { $in: deviceIds } }),
-    db.collection("device_ui").deleteMany({ user_id: uid, deviceId: { $in: deviceIds } }),
     db.collection("device_groups").updateMany({ user_id: uid }, { $pull: { deviceIds: { $in: deviceIds } } }),
     db
       .collection("device_schedules")

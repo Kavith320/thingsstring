@@ -75,7 +75,6 @@ async function removePersonalisation(db, { userId, deviceIds = [] }) {
     await cleanupUserDeviceAccess(db, userId, shared.map((s) => s.deviceId), "user deleted");
     await db.collection("device_alerts").deleteMany({ userId });
     await db.collection("device_invites").updateMany({ invitedBy: userId, status: "pending" }, { $set: { status: "revoked", revokedReason: "inviter deleted" } });
-    await db.collection("device_ui").deleteMany({ user_id: userId });
     await db.collection("device_groups").deleteMany({ user_id: userId });
     await db.collection("dashboards").deleteOne({ _id: userId });
     await deleteFiles(db, { user_id: userId });

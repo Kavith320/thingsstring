@@ -95,7 +95,7 @@ Removes the avatar and deletes the uploaded file.
 
 ## 3. Device display settings
 
-These settings belong to the user, not the device. They are kept separate from the firmware config, so **a device reboot never resets them**. When an admin transfers a device to another user, the new owner starts with clean settings.
+These settings **belong to the device**: everyone it's shared with sees the same name, icon, colour, value layout and location. The **owner and managers** can change them; viewers and operators see them read-only (`GET …/ui` returns `canEdit`). They are kept separate from the firmware config, so **a device reboot never resets them**. When an admin transfers a device to another user, the new owner starts with clean settings.
 
 `GET /api/devices` and `GET /api/devices/:deviceId` now also return two objects for every device:
 ```json

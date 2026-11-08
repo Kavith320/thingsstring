@@ -71,7 +71,7 @@ async function describeInvite(db, invite) {
     ObjectId.isValid(invite.invitedBy)
       ? db.collection("users").findOne({ _id: new ObjectId(invite.invitedBy) }, { projection: { name: 1 } })
       : null,
-    db.collection("device_ui").findOne({ _id: `${invite.invitedBy}:${invite.deviceId}` }, { projection: { displayName: 1 } }),
+    db.collection("device_ui").findOne({ _id: invite.deviceId }, { projection: { displayName: 1 } }),
     db.collection("users").findOne({ email: invite.email }, { projection: { _id: 1 } }),
   ]);
   return {

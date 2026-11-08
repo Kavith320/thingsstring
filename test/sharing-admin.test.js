@@ -114,17 +114,21 @@ test("admin transfer resets sharing; deleting a user removes their access elsewh
   assert.equal(await db.collection("device_access").countDocuments({ userId: bob.id }), 0);
 });
 
-test("startup migration re-keys old device_ui documents to per-user keys (idempotent)", async () => {
+test("startup migration: both earlier device_ui formats become one shared doc per device (idempotent)", async () => {
   const { migrateDeviceUiKeys } = require("../src/services/deviceUi");
+  await createDevice(db, "d2", "owner2");
   await db.collection("device_ui").insertMany([
+    // first format: _id = deviceId, no deviceId field
     { _id: "d1", user_id: "u1", displayName: "Old Pump", updatedAt: new Date() },
-    { _id: "orphan", displayName: "no owner" },
+    // per-user format: the owner's copy wins over a newer member copy
+    { _id: "owner2:d2", deviceId: "d2", user_id: "owner2", displayName: "Owner name", updatedAt: new Date(1000) },
+    { _id: "member:d2", deviceId: "d2", user_id: "member", displayName: "Member name", updatedAt: new Date(2000) },
   ]);
   await migrateDeviceUiKeys(db);
-  await migrateDeviceUiKeys(db); // second run changes nothing
-  const docs = await db.collection("device_ui").find().toArray();
-  assert.equal(docs.length, 1);
-  assert.equal(docs[0]._id, "u1:d1");
-  assert.equal(docs[0].deviceId, "d1");
-  assert.equal(docs[0].displayName, "Old Pump");
+  await migrateDeviceUiKeys(db);
+  const docs = await db.collection("device_ui").find().sort({ _id: 1 }).toArray();
+  assert.deepEqual(docs.map((d) => [d._id, d.deviceId, d.displayName]), [
+    ["d1", "d1", "Old Pump"],
+    ["d2", "d2", "Owner name"],
+  ]);
 });

@@ -1,8 +1,10 @@
 // src/services/deviceUi.js
-// Per-user display settings for a device (name, icon, colour, which values show
-// on the card, location). Stored in `device_ui` with _id = "<userId>:<deviceId>" (each
-// member of a shared device has their own), separate
-// from device_config so a device reboot (config re-publish) never wipes them.
+// Display settings of a device (name, icon, colour, description, which sensor and
+// actuator values show on the card and in what order, location). They belong to the
+// DEVICE: everyone it is shared with sees the same thing; the owner and managers can
+// change them. (Email alerts, groups and the dashboard layout are personal.)
+// Stored in `device_ui` with _id = deviceId, separate from device_config so a device
+// reboot (config re-publish) never wipes them.
 
 const { isPlainObject, isSafeKey } = require("../utils/http");
 const { fail, optString, optColor, optBool, parseIconRef } = require("../utils/validate");
@@ -29,35 +31,51 @@ function serializeUi(doc) {
   return out;
 }
 
-/** Load ui docs for many devices of one user: Map(deviceId -> ui). */
-async function loadUiMap(db, userId, deviceIds) {
+/** Load the settings of many devices: Map(deviceId -> ui). */
+async function loadUiMap(db, deviceIds) {
   if (!deviceIds.length) return new Map();
-  const docs = await db
-    .collection("device_ui")
-    .find({ user_id: String(userId), deviceId: { $in: deviceIds } })
-    .toArray();
-  return new Map(docs.map((d) => [d.deviceId, serializeUi(d)]));
+  const docs = await db.collection("device_ui").find({ _id: { $in: deviceIds } }).toArray();
+  return new Map(docs.map((d) => [d._id, serializeUi(d)]));
 }
 
-const uiId = (userId, deviceId) => `${userId}:${deviceId}`;
+/** Every uploaded-icon ref currently used by a settings doc (may stay even if uploaded by someone else). */
+function iconRefsIn(doc) {
+  if (!doc) return new Set();
+  return new Set([doc.icon, ...(doc.sensors || []).map((e) => e.icon), ...(doc.actuators || []).map((e) => e.icon)].filter(Boolean));
+}
 
 /**
- * One-time migration: early versions keyed device_ui by deviceId alone (one owner per
- * device). Re-key those docs to "<userId>:<deviceId>". Safe to run on every startup.
+ * Startup migration to one shared document per device (_id = deviceId). Handles both
+ * earlier formats and is safe to run on every start:
+ *  - first version: _id = deviceId without a deviceId field
+ *  - short-lived per-user version: _id = "<userId>:<deviceId>"; the owner's copy is kept
+ *    (or the most recently edited one if the owner had none)
  */
 async function migrateDeviceUiKeys(db) {
   const col = db.collection("device_ui");
-  const old = await col.find({ deviceId: { $exists: false } }).toArray();
-  for (const d of old) {
-    if (!d.user_id) {
-      await col.deleteOne({ _id: d._id });
-      continue;
-    }
-    const { _id, ...rest } = d;
-    await col.updateOne({ _id: uiId(d.user_id, _id) }, { $setOnInsert: { ...rest, deviceId: _id } }, { upsert: true });
-    await col.deleteOne({ _id });
+  await col.updateMany({ deviceId: { $exists: false } }, [{ $set: { deviceId: "$_id" } }]);
+
+  const perUser = await col.find({ $expr: { $ne: ["$_id", "$deviceId"] } }).toArray();
+  if (!perUser.length) return;
+
+  const byDevice = new Map();
+  for (const d of perUser) byDevice.set(d.deviceId, [...(byDevice.get(d.deviceId) || []), d]);
+
+  const owners = new Map(
+    (await db.collection("device_config").find({ _id: { $in: [...byDevice.keys()] } }, { projection: { device: 1, user_id: 1 } }).toArray()).map(
+      (c) => [c._id, String(c.device?.user_id ?? c.user_id ?? "")]
+    )
+  );
+
+  for (const [deviceId, docs] of byDevice) {
+    const keep =
+      docs.find((d) => String(d.user_id) === owners.get(deviceId)) ||
+      docs.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))[0];
+    const { _id, user_id, ...fields } = keep;
+    await col.updateOne({ _id: deviceId }, { $setOnInsert: { ...fields, deviceId, updatedBy: user_id || null } }, { upsert: true });
+    await col.deleteMany({ _id: { $in: docs.map((d) => d._id) } });
   }
-  if (old.length) console.log(`🗂️ Migrated ${old.length} device_ui document(s) to per-user keys`);
+  console.log(`🗂️ Merged ${perUser.length} per-user device_ui document(s) into ${byDevice.size} shared device setting(s)`);
 }
 
 /**
@@ -133,4 +151,4 @@ function validateUiPatch(body) {
   return { $set, iconRefs };
 }
 
-module.exports = { serializeUi, loadUiMap, validateUiPatch, validateLocation, uiId, migrateDeviceUiKeys };
+module.exports = { serializeUi, loadUiMap, validateUiPatch, validateLocation, iconRefsIn, migrateDeviceUiKeys };
