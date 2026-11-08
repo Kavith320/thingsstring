@@ -8,7 +8,23 @@
 // Without SMTP_HOST the mailer runs in "log" mode: emails are printed, not sent.
 // MAIL_TRANSPORT=json (tests) builds the message with nodemailer and keeps it in memory.
 
+const fs = require("node:fs");
+const path = require("node:path");
 const nodemailer = require("nodemailer");
+
+// The logo is embedded in each email (no hosting needed, shows without "display images")
+const LOGO_PATH = path.join(__dirname, "..", "..", "assets", "email-logo.png");
+let logoBuffer;
+function logoAttachment() {
+  if (logoBuffer === undefined) {
+    try {
+      logoBuffer = fs.readFileSync(LOGO_PATH);
+    } catch {
+      logoBuffer = null;
+    }
+  }
+  return logoBuffer ? [{ filename: "thingsstring.png", content: logoBuffer, cid: "ts-logo", contentDisposition: "inline" }] : [];
+}
 
 let transporter = null;
 let mode = null;
@@ -62,6 +78,7 @@ async function sendMail(msg) {
     html: msg.html,
     text: msg.text,
     headers: msg.headers,
+    attachments: typeof msg.html === "string" && msg.html.includes("cid:ts-logo") ? logoAttachment() : undefined,
   };
 
   if (!t) {
