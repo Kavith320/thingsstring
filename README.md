@@ -39,3 +39,4 @@ Use a **different `MQTT_CLIENT_ID`** and, ideally, a separate database and broke
 - [API_DOCUMENTATION.md](API_DOCUMENTATION.md): user API and MQTT protocol
 - [API_ADMIN.md](API_ADMIN.md): admin API
 - [AUTOMATION_FRONTEND_GUIDE.md](AUTOMATION_FRONTEND_GUIDE.md): automation flow editor integration
+- [PERSONALISATION_FRONTEND_GUIDE.md](PERSONALISATION_FRONTEND_GUIDE.md): profile, theme, device names/icons/colours, groups, dashboard layout, map, uploads

@@ -191,6 +191,11 @@ Updates the desired state of actuators on a device.
 - The change is saved and published as a retained message to `ts/:deviceId/control` via MQTT.
 - Returns `403` if an admin has locked the device.
 
+### Personalisation (profile, dashboard, groups, map, uploads)
+`/api/me`, `/api/devices/:deviceId/ui`, `/api/devices/map`, `/api/groups`, `/api/dashboard`, `/api/files/icons`, `/files/:id`. See **[PERSONALISATION_FRONTEND_GUIDE.md](PERSONALISATION_FRONTEND_GUIDE.md)**.
+
+`GET /api/devices` and `GET /api/devices/:deviceId` also return `status: { online, lastSeen }` and `ui` (display settings) for each device.
+
 ---
 
 ## 3. Scheduling

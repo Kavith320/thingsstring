@@ -8,8 +8,10 @@ const {
   exportDeviceTelemetryCsv,
   updateDeviceControl
 } = require("../controllers/devices.controller");
+const { getDeviceUi, updateDeviceUi, getDeviceMap } = require("../controllers/customize.controller");
 
 router.get("/", requireAuth, listMyDevices);
+router.get("/map", requireAuth, getDeviceMap); // before /:deviceId
 router.get("/:deviceId", requireAuth, getDeviceById);
 router.get("/:deviceId/telemetry", requireAuth, getDeviceTelemetry);
 // CSV export reads the whole history twice; cap it per user
@@ -21,5 +23,7 @@ const exportLimit = rateLimit({
 });
 router.get("/:deviceId/telemetry/export", requireAuth, exportLimit, exportDeviceTelemetryCsv);
 router.post("/:deviceId/control", requireAuth, updateDeviceControl);
+router.get("/:deviceId/ui", requireAuth, getDeviceUi);
+router.patch("/:deviceId/ui", requireAuth, updateDeviceUi);
 
 module.exports = router;

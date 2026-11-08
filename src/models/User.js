@@ -22,6 +22,22 @@ const userSchema = new mongoose.Schema(
 
     // Bumped to revoke every token issued before (password reset, role change, ...)
     tokenVersion: { type: Number, default: 0 },
+
+    // Profile (editable by the user via /api/me)
+    phone: { type: String, default: null },
+    organization: { type: String, default: null },
+    country: { type: String, default: null },
+    bio: { type: String, default: null },
+    // "avatar:robot-3" (built-in set), "emoji:🦊", or "file:<id>" (uploaded, served at /files/<id>)
+    avatar: { type: String, default: null },
+
+    preferences: {
+      theme: { type: String, enum: ["light", "dark", "system"], default: "system" },
+      accentColor: { type: String, default: null },
+      language: { type: String, default: "en" },
+      timezone: { type: String, default: null },
+      units: { type: String, enum: ["metric", "imperial"], default: "metric" },
+    },
   },
   { timestamps: true }
 );
