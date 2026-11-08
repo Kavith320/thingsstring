@@ -3,13 +3,13 @@
 // The API process's change stream publishes it to the device over MQTT.
 
 const { getDb } = require("../db/mongo");
+const { notifyUser, deviceDisplayName } = require("../email/notify");
+
+const AUTOMATION_EMAIL_WINDOW_MS = 15 * 60e3; // at most one email per rule per 15 min
 const { parseObjectId } = require("../utils/http");
-const {
-  offlineThresholdSec,
-  getDeviceOnlineState,
-  isAutoMode,
-  deviceOwnerId,
-} = require("../services/deviceState");
+const { offlineThresholdSec, getDeviceOnlineState, isAutoMode } = require("../services/deviceState");
+const { getDeviceAccess, atLeast } = require("../services/deviceAccess");
+const { logActivity } = require("../services/activity");
 
 /** Get a nested value using dot notation, own properties only. */
 function getNestedValue(obj, path) {
@@ -76,18 +76,19 @@ async function runFlow(db, flowId) {
       { upsert: true }
     );
 
-  // 1) The flow owner must still own both devices (devices can be transferred or deleted)
-  const [sensorCfg, actuatorCfg] = await Promise.all([
-    configCol.findOne({ _id: flow.deviceId }),
-    configCol.findOne({ _id: actuatorDeviceId }),
+  // 1) The rule's creator must still have access (devices can be transferred, deleted or unshared):
+  //    viewer on the sensor, manager on the actuator device
+  const [sensorAccess, actuatorAccess] = await Promise.all([
+    getDeviceAccess(db, flow.deviceId, flow.user_id),
+    flow.action ? getDeviceAccess(db, actuatorDeviceId, flow.user_id) : null,
   ]);
-  if (!sensorCfg || !actuatorCfg) {
-    return log({ status: "error", reason: "device not found" });
+  const sensorExists = sensorAccess || (await configCol.countDocuments({ _id: flow.deviceId }, { limit: 1 }));
+  if (!sensorExists) return log({ status: "error", reason: "device not found" });
+  if (!sensorAccess || (flow.action && (!actuatorAccess || !atLeast(actuatorAccess.role, "manager")))) {
+    console.log(`🔒 [AUTOMATION] Flow "${flow.name}" skipped: its creator no longer has access to the device(s)`);
+    return log({ status: "error", reason: "flow owner has no access to the device" });
   }
-  if (deviceOwnerId(sensorCfg) !== String(flow.user_id) || deviceOwnerId(actuatorCfg) !== String(flow.user_id)) {
-    console.log(`🔒 [AUTOMATION] Flow "${flow.name}" skipped: owner no longer owns the device(s)`);
-    return log({ status: "error", reason: "flow owner does not own device" });
-  }
+  const actuatorCfg = actuatorAccess?.config || sensorAccess.config;
 
   // 2) Latest telemetry + offline check on the sensor
   const maxAgeSec = flow.maxTelemetryAgeSec || offlineThresholdSec();
@@ -130,6 +131,13 @@ async function runFlow(db, flowId) {
     return log({ status: "skipped", reason: "cooldown active", currentValue, operator: flow.condition?.operator || "delta" });
   }
 
+  // 5b) Alert-only rule: no actuator, just the email
+  if (!flow.action) {
+    const r = await sendFlowEmail(db, flow, { currentValue, actionText: null });
+    await saveValue(currentValue, { lastActionTs: now });
+    return log({ status: "ran", currentValue, previousValue: lastValue, delta, action: null, emailed: r.queued });
+  }
+
   // 6) Target device checks: online (if it's a different hub) and not locked out
   if (actuatorDeviceId !== flow.deviceId) {
     const actState = await getDeviceOnlineState(db, actuatorDeviceId, maxAgeSec);
@@ -166,7 +174,42 @@ async function runFlow(db, flowId) {
   );
 
   await saveValue(currentValue, { lastActionTs: now });
-  await log({ status: "ran", currentValue, previousValue: lastValue, delta, action: flow.action });
+  await logActivity(db, {
+    deviceId: actuatorDeviceId,
+    actor: { type: "automation", id: String(_id), name: flow.name },
+    action: "control.update",
+    details: { actuators: { [actuatorKey]: { value: flow.action.setValue } }, reading: { [flow.metricPath]: currentValue } },
+  });
+  let emailed;
+  if (flow.notify?.email) {
+    const on = flow.action.setValue === true ? "ON" : flow.action.setValue === false ? "OFF" : JSON.stringify(flow.action.setValue);
+    const target = actuatorDeviceId !== flow.deviceId ? ` on ${actuatorDeviceId}` : "";
+    emailed = (await sendFlowEmail(db, flow, { currentValue, actionText: `Set ${actuatorKey} to ${on}${target}` })).queued;
+  }
+  await log({ status: "ran", currentValue, previousValue: lastValue, delta, action: flow.action, ...(emailed !== undefined ? { emailed } : {}) });
+}
+
+/** Email the flow owner that the rule fired (respects their settings and the hourly cap). */
+async function sendFlowEmail(db, flow, { currentValue, actionText }) {
+  if (!flow.notify?.email) return { queued: false };
+  const { name } = await deviceDisplayName(db, flow.deviceId, flow.user_id);
+  return notifyUser(db, {
+    userId: flow.user_id,
+    category: "automation",
+    template: "automationTriggered",
+    data: {
+      flowName: flow.name,
+      deviceId: flow.deviceId,
+      deviceName: name,
+      metricPath: flow.metricPath,
+      value: currentValue,
+      operator: flow.condition?.operator || "changed by >",
+      target: flow.condition ? flow.condition.value : flow.deltaThreshold,
+      actionText,
+    },
+    dedupeKey: `flow:${flow._id}`,
+    dedupeWindowMs: Math.max((flow.cooldownSec || 0) * 1000, AUTOMATION_EMAIL_WINDOW_MS),
+  });
 }
 
 function defineFlowJobs(agenda) {

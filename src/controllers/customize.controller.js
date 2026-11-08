@@ -3,8 +3,9 @@
 // layout, the device map and custom icon uploads. All per user.
 
 const { getDb } = require("../db/mongo");
-const { findOwnedDevice, getDeviceStatus } = require("../services/deviceState");
-const { serializeUi, validateUiPatch } = require("../services/deviceUi");
+const { getDeviceStatus } = require("../services/deviceState");
+const { serializeUi, validateUiPatch, uiId } = require("../services/deviceUi");
+const { requireDeviceRole, accessibleDevices } = require("../services/deviceAccess");
 const { saveImage, deleteFiles } = require("../services/fileStore");
 const { sendServerError, parseObjectId, isPlainObject } = require("../utils/http");
 const {
@@ -36,8 +37,9 @@ async function getDeviceUi(req, res) {
   try {
     const db = getDb();
     const { deviceId } = req.params;
-    if (!(await findOwnedDevice(db, deviceId, req.user.id))) return notFound(res);
-    const doc = await db.collection("device_ui").findOne({ _id: deviceId, user_id: req.user.id });
+    const access = await requireDeviceRole(db, deviceId, req.user.id, "viewer");
+    if (access.error) return notFound(res);
+    const doc = await db.collection("device_ui").findOne({ _id: uiId(req.user.id, deviceId) });
     return res.json({ ok: true, deviceId, ui: serializeUi(doc) });
   } catch (e) {
     return handle(res, e, "get device ui");
@@ -49,17 +51,16 @@ async function updateDeviceUi(req, res) {
   try {
     const db = getDb();
     const { deviceId } = req.params;
-    if (!(await findOwnedDevice(db, deviceId, req.user.id))) return notFound(res);
+    const access = await requireDeviceRole(db, deviceId, req.user.id, "viewer");
+    if (access.error) return notFound(res);
 
     const { $set, iconRefs } = validateUiPatch(req.body);
     await assertOwnFiles(db, req.user.id, iconRefs, "icon");
 
-    const col = db.collection("device_ui");
-    // Settings left behind by a previous owner are never merged into the new owner's
-    await col.deleteOne({ _id: deviceId, user_id: { $ne: req.user.id } });
-    const doc = await col.findOneAndUpdate(
-      { _id: deviceId },
-      { $set: { ...$set, user_id: req.user.id, updatedAt: new Date() } },
+    // Personal to this user: every member of a shared device has their own settings
+    const doc = await db.collection("device_ui").findOneAndUpdate(
+      { _id: uiId(req.user.id, deviceId) },
+      { $set: { ...$set, deviceId, user_id: req.user.id, updatedAt: new Date() } },
       { upsert: true, returnDocument: "after" }
     );
     return res.json({ ok: true, deviceId, ui: serializeUi(doc) });
@@ -76,17 +77,13 @@ async function getDeviceMap(req, res) {
       .collection("device_ui")
       .find({ user_id: req.user.id, location: { $ne: null } })
       .toArray();
-    const ids = uiDocs.map((d) => d._id);
-    const owned = new Set(
-      (await db.collection("device_config").find({ _id: { $in: ids }, "device.user_id": req.user.id }, { projection: { _id: 1 } }).toArray()).map(
-        (d) => d._id
-      )
-    );
-    const mine = uiDocs.filter((d) => owned.has(d._id));
-    const statuses = await Promise.all(mine.map((d) => getDeviceStatus(db, d._id)));
+    const roles = await accessibleDevices(db, req.user.id);
+    const mine = uiDocs.filter((d) => roles.has(d.deviceId));
+    const statuses = await Promise.all(mine.map((d) => getDeviceStatus(db, d.deviceId)));
 
     const devices = mine.map((d, i) => ({
-      deviceId: d._id,
+      deviceId: d.deviceId,
+      role: roles.get(d.deviceId),
       displayName: d.displayName || null,
       icon: d.icon || null,
       color: d.color || null,
@@ -115,9 +112,9 @@ function serializeGroup(g, ownedIds) {
   };
 }
 
+/** Every device the user can see (owned or shared): groups may hold any of them. */
 async function ownedDeviceIdSet(db, userId) {
-  const rows = await db.collection("device_config").find({ "device.user_id": userId }, { projection: { _id: 1 } }).toArray();
-  return new Set(rows.map((r) => r._id));
+  return new Set((await accessibleDevices(db, userId)).keys());
 }
 
 /** Validate group fields; `partial` for PATCH. Returns { fields, iconRefs }. */

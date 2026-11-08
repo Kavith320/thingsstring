@@ -1,5 +1,6 @@
 const { getDb } = require("../db/mongo");
-const { findOwnedDevice } = require("../services/deviceState");
+const { requireDeviceRole } = require("../services/deviceAccess");
+const { logActivity, actorFromReq } = require("../services/activity");
 const { sendServerError, parseObjectId, isPlainObject, isSafeKey, clampInt } = require("../utils/http");
 
 /**
@@ -17,19 +18,29 @@ const MAX_UI_METADATA_BYTES = 256 * 1024;
  * Returns { error, status } or { flow } with normalised values.
  */
 async function validateFlow(db, userId, input) {
-  const { name, deviceId, enabled, intervalSec, metricPath, deltaThreshold, condition, action, cooldownSec, ui_metadata } =
+  const { name, deviceId, enabled, intervalSec, metricPath, deltaThreshold, condition, action, cooldownSec, ui_metadata, notify } =
     input;
 
   if (typeof deviceId !== "string" || !deviceId) return { error: "deviceId is required" };
   if (typeof metricPath !== "string" || !metricPath || metricPath.length > 200 || !metricPath.split(".").every(isSafeKey)) {
     return { error: "metricPath must be a dot path like 'data.temp'" };
   }
-  if (!isPlainObject(action) || typeof action.actuatorKey !== "string" || !isSafeKey(action.actuatorKey)) {
-    return { error: "action.actuatorKey is required" };
+  if (notify !== undefined && notify !== null && (!isPlainObject(notify) || (notify.email !== undefined && typeof notify.email !== "boolean"))) {
+    return { error: "notify must be an object like { email: true }" };
   }
-  if (action.setValue === undefined) return { error: "action.setValue is required" };
-  if (action.deviceId !== undefined && action.deviceId !== null && typeof action.deviceId !== "string") {
-    return { error: "action.deviceId must be a string" };
+  const notifyEmail = notify?.email === true;
+  const hasAction = action !== undefined && action !== null;
+  if (!hasAction && !notifyEmail) {
+    return { error: "action is required (or set notify.email: true for an alert-only rule)" };
+  }
+  if (hasAction) {
+    if (!isPlainObject(action) || typeof action.actuatorKey !== "string" || !isSafeKey(action.actuatorKey)) {
+      return { error: "action.actuatorKey is required" };
+    }
+    if (action.setValue === undefined) return { error: "action.setValue is required" };
+    if (action.deviceId !== undefined && action.deviceId !== null && typeof action.deviceId !== "string") {
+      return { error: "action.deviceId must be a string" };
+    }
   }
 
   let normCondition = null;
@@ -46,15 +57,21 @@ async function validateFlow(db, userId, input) {
     if (JSON.stringify(ui_metadata).length > MAX_UI_METADATA_BYTES) return { error: "ui_metadata is too large" };
   }
 
-  const actionDeviceId = action.deviceId || deviceId;
-  const [sensor, actuator] = await Promise.all([
-    findOwnedDevice(db, deviceId, userId),
-    findOwnedDevice(db, actionDeviceId, userId),
+  const actionDeviceId = hasAction ? action.deviceId || deviceId : deviceId;
+  // Reading a sensor needs viewer access; switching an actuator needs manager access
+  const [sensorAccess, actuatorAccess] = await Promise.all([
+    requireDeviceRole(db, deviceId, userId, "viewer"),
+    hasAction ? requireDeviceRole(db, actionDeviceId, userId, "manager") : null,
   ]);
-  if (!sensor) return { status: 404, error: `Device '${deviceId}' not found` };
-  if (!actuator) return { status: 404, error: `Device '${actionDeviceId}' not found` };
-  if (!isPlainObject(actuator.actuators) || !Object.prototype.hasOwnProperty.call(actuator.actuators, action.actuatorKey)) {
-    return { error: `Unknown actuator '${action.actuatorKey}' on device '${actionDeviceId}'` };
+  if (sensorAccess.error) return { status: sensorAccess.status, error: sensorAccess.status === 404 ? `Device '${deviceId}' not found` : sensorAccess.error };
+  if (hasAction) {
+    if (actuatorAccess.error) {
+      return { status: actuatorAccess.status, error: actuatorAccess.status === 404 ? `Device '${actionDeviceId}' not found` : actuatorAccess.error };
+    }
+    const actuator = actuatorAccess.config;
+    if (!isPlainObject(actuator.actuators) || !Object.prototype.hasOwnProperty.call(actuator.actuators, action.actuatorKey)) {
+      return { error: `Unknown actuator '${action.actuatorKey}' on device '${actionDeviceId}'` };
+    }
   }
 
   const threshold = parseFloat(deltaThreshold);
@@ -67,11 +84,22 @@ async function validateFlow(db, userId, input) {
       metricPath,
       deltaThreshold: Number.isFinite(threshold) && threshold >= 0 ? threshold : 0,
       condition: normCondition,
-      action: { deviceId: actionDeviceId, actuatorKey: action.actuatorKey, setValue: action.setValue },
+      action: hasAction ? { deviceId: actionDeviceId, actuatorKey: action.actuatorKey, setValue: action.setValue } : null,
+      notify: { email: notifyEmail },
       cooldownSec: clampInt(cooldownSec, { min: 0, max: 7 * 86400, fallback: 60 }),
       ui_metadata: ui_metadata || {},
     },
   };
+}
+
+/** Record a flow change on the history of every device it touches. */
+async function logFlow(db, req, action, flow) {
+  const ids = [...new Set([flow.deviceId, flow.action?.deviceId].filter(Boolean))];
+  await Promise.all(
+    ids.map((deviceId) =>
+      logActivity(db, { deviceId, actor: actorFromReq(req), action, details: { flowId: String(flow._id), name: flow.name } })
+    )
+  );
 }
 
 // Create flow
@@ -84,6 +112,7 @@ exports.createFlow = async (req, res) => {
     const now = new Date();
     const newFlow = { user_id: req.user.id, ...result.flow, createdAt: now, updatedAt: now };
     const inserted = await db.collection("automation_flows").insertOne(newFlow);
+    await logFlow(db, req, "automation.create", { ...newFlow, _id: inserted.insertedId });
 
     return res.status(201).json({ ok: true, flow: { ...newFlow, _id: inserted.insertedId } });
   } catch (error) {
@@ -128,6 +157,7 @@ const UPDATABLE = [
   "action",
   "cooldownSec",
   "ui_metadata",
+  "notify",
 ];
 
 exports.updateFlow = async (req, res) => {
@@ -157,6 +187,7 @@ exports.updateFlow = async (req, res) => {
       { returnDocument: "after" }
     );
     if (!flow) return res.status(404).json({ ok: false, error: "Flow not found" });
+    await logFlow(db, req, "automation.update", flow);
 
     return res.json({ ok: true, flow });
   } catch (error) {
@@ -171,8 +202,9 @@ exports.deleteFlow = async (req, res) => {
     if (!_id) return res.status(400).json({ ok: false, error: "Invalid flow id" });
 
     const db = getDb();
-    const result = await db.collection("automation_flows").deleteOne({ _id, user_id: req.user.id });
-    if (result.deletedCount === 0) return res.status(404).json({ ok: false, error: "Flow not found" });
+    const removed = await db.collection("automation_flows").findOneAndDelete({ _id, user_id: req.user.id });
+    if (!removed) return res.status(404).json({ ok: false, error: "Flow not found" });
+    await logFlow(db, req, "automation.delete", removed);
 
     await db.collection("automation_flow_state").deleteMany({ flowId: _id });
     return res.json({ ok: true });

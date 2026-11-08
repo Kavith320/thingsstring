@@ -89,6 +89,34 @@ These three calls need **no login**: the link may be opened on another device. A
 | `POST /api/auth/confirm-email` | — | `{ token }` | Switches to the new email and tells the old address. Returns `{ ok, user }`. |
 
 - Login, register, Google and `/api/me` responses include `emailVerified`. Show a "please verify your email" banner with a **Resend** button while it is `false`.
+### Notification emails
+
+| Email | Sent when | Can be turned off |
+|---|---|:-:|
+| Device offline / back online | **Per device, off by default.** Each user turns them on per device and picks the delay (2–1440 min). See [SHARING_FRONTEND_GUIDE.md](SHARING_FRONTEND_GUIDE.md) §4 | ✅ per device, and the master switch `deviceOffline` |
+| Automation triggered | A rule with `notify.email: true` fires | ✅ `automation` |
+| Device locked/unlocked, device transferred, account suspended/reactivated, password reset by admin | An admin does it | ❌ |
+| Password changed, email changed | Security notices | ❌ |
+
+| Endpoint | Login | Body |
+|---|:-:|---|
+| `GET /api/me/notifications` | ✅ | — returns `{ ok, notifications: { deviceOffline, automation } }` (also in `GET /api/me`) |
+| `PATCH /api/me/notifications` | ✅ | `{ deviceOffline?: bool, automation?: bool }` |
+| `POST /api/auth/unsubscribe` | — | `{ token }` from the email's "Turn off these emails" link, which opens `APP_URL/unsubscribe?token=…`. An offline-alert link turns off that device's alerts and returns `{ ok, category, deviceId }`. An automation link turns off automation emails and returns `{ ok, category, notifications }`. |
+
+**Free-tier email budget:**
+- Emails are limited to `MAIL_DAILY_LIMIT` per rolling 24 h (default 300, Brevo's free plan). The sender never goes over it; extra emails wait.
+- `MAIL_RESERVED` (default 60) of those are kept for sign-up, password, invitation and admin emails. Optional alerts stop once only the reserve is left.
+- Admins can check usage with `GET /api/admin/email/stats`.
+
+**Anti-spam rules:**
+- At most 20 optional alerts per user per hour.
+- One offline email per device per user per 30 minutes, so a device with flaky Wi-Fi doesn't flood the inbox.
+- "Back online" is only sent if "offline" was sent.
+- Turning alerts on while the device is already offline doesn't alert for that outage.
+- If every device stops reporting at once (a server, MQTT or broker outage), nothing is sent until data flows again.
+- Locked devices and suspended users get no alerts.
+
 - Some later features (e.g. device sharing) will answer `403 { code: "EMAIL_NOT_VERIFIED" }` for unverified users.
 - Security notices are sent automatically when a password changes (from settings or a reset) and when the email changes.
 
@@ -216,6 +244,9 @@ Updates the desired state of actuators on a device.
 - The change is saved and published as a retained message to `ts/:deviceId/control` via MQTT.
 - Returns `403` if an admin has locked the device.
 
+### Sharing, roles, per-device alerts, activity history
+Devices can be shared by email invitation with the roles **viewer**, **operator** and **manager**. New users can sign up straight from the invitation. Device responses include `role` and `sharedBy`. See **[SHARING_FRONTEND_GUIDE.md](SHARING_FRONTEND_GUIDE.md)**.
+
 ### Personalisation (profile, dashboard, groups, map, uploads)
 `/api/me`, `/api/devices/:deviceId/ui`, `/api/devices/map`, `/api/groups`, `/api/dashboard`, `/api/files/icons`, `/files/:id`. See **[PERSONALISATION_FRONTEND_GUIDE.md](PERSONALISATION_FRONTEND_GUIDE.md)**.
 
@@ -297,6 +328,8 @@ Polling-based rules to trigger actions based on sensor changes.
 ### Get Flow Logs
 `GET /api/automation/flows/:id/logs?limit=20`
 Returns the recent execution history for one of **your** flows (max 500). Logs are kept for 30 days.
+
+**"Email me" and alert-only rules:** add `"notify": { "email": true }` to a flow to email the owner each time it fires. With `notify.email: true`, `action` may be `null`, which gives an **alert-only** rule (e.g. "email me if temperature > 40"). Without it, `action` is required. Emails are limited to one per rule per 15 minutes (or per `cooldownSec` if longer), and respect the user's `automation` notification setting. Logs of rules that emailed have `emailed: true`.
 
 **Validation rules (create and update):**
 - `deviceId` and `action.deviceId` must both be devices **you own**, otherwise `404`.

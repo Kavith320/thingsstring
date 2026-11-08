@@ -3,6 +3,8 @@ const cronParser = require("cron-parser");
 const moment = require("moment-timezone");
 
 const { getDb } = require("../db/mongo");
+const { requireDeviceRole } = require("../services/deviceAccess");
+const { logActivity, actorFromReq } = require("../services/activity");
 const { sendServerError, parseObjectId, isPlainObject: isObject, isSafeKey } = require("../utils/http");
 
 const MAX_DURATION_SEC = 7 * 24 * 3600;
@@ -33,10 +35,11 @@ function normalizeActions(actions) {
   return actions;
 }
 
-async function loadOwnedDeviceConfig(db, deviceId, userMongoId) {
-  const configCol = db.collection("device_config");
-  return await configCol.findOne({ _id: deviceId, "device.user_id": userMongoId });
+/** { config } or { status, error } — schedules need manager access to change, viewer to list. */
+async function deviceFor(db, deviceId, userId, min) {
+  return requireDeviceRole(db, deviceId, userId, min);
 }
+const deny = (res, a) => res.status(a.status).json({ ok: false, error: a.status === 404 ? "Device not found" : a.error });
 
 function validateActuatorsAgainstConfig(config, actions, endActions) {
   const configActuators = config?.actuators || {};
@@ -97,9 +100,10 @@ async function createDeviceSchedule(req, res) {
       }
     }
 
-    // 1) verify device belongs to user
-    const config = await loadOwnedDeviceConfig(db, deviceId, userMongoId);
-    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
+    // 1) managers and the owner can create schedules
+    const access = await deviceFor(db, deviceId, userMongoId, "manager");
+    if (access.error) return deny(res, access);
+    const { config } = access;
 
     // 2) validate actuator names against config.actuators
     const actErr = validateActuatorsAgainstConfig(config, actions, endActions);
@@ -123,6 +127,7 @@ async function createDeviceSchedule(req, res) {
     };
 
     const result = await schedulesCol.insertOne(doc);
+    await logActivity(db, { deviceId, actor: actorFromReq(req), action: "schedule.create", details: { scheduleId: String(result.insertedId), name } });
 
     return res.status(201).json({
       ok: true,
@@ -141,14 +146,14 @@ async function listDeviceSchedules(req, res) {
     const userMongoId = req.user.id;
     const { deviceId } = req.params;
 
-    // verify device belongs to user (so you can't list others)
-    const config = await loadOwnedDeviceConfig(db, deviceId, userMongoId);
-    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
+    // Anyone with access sees every schedule on the device (shared devices: who set what)
+    const access = await deviceFor(db, deviceId, userMongoId, "viewer");
+    if (access.error) return deny(res, access);
 
     const schedulesCol = db.collection("device_schedules");
 
     const schedules = await schedulesCol
-      .find({ deviceId, user_id: userMongoId })
+      .find({ deviceId })
       .sort({ _id: -1 })
       .toArray();
 
@@ -170,9 +175,13 @@ async function updateSchedule(req, res) {
 
     const schedulesCol = db.collection("device_schedules");
 
-    // 1) load schedule and verify ownership
-    const existing = await schedulesCol.findOne({ _id, user_id: userMongoId });
+    // 1) load schedule; managers/owner of its device may edit it
+    const existing = await schedulesCol.findOne({ _id });
     if (!existing) return res.status(404).json({ ok: false, error: "Schedule not found" });
+    const access = await deviceFor(db, existing.deviceId, userMongoId, "manager");
+    if (access.error) {
+      return access.status === 404 ? res.status(404).json({ ok: false, error: "Schedule not found" }) : deny(res, access);
+    }
 
     const body = req.body || {};
     const $set = {};
@@ -260,9 +269,7 @@ async function updateSchedule(req, res) {
     // We validate using "next" actions arrays (existing + updates)
     const nextActions = $set.actions !== undefined ? $set.actions : existing.actions;
 
-    const config = await loadOwnedDeviceConfig(db, existing.deviceId, userMongoId);
-    if (!config) return res.status(404).json({ ok: false, error: "Device not found for this schedule" });
-
+    const { config } = access;
     const actErr = validateActuatorsAgainstConfig(config, nextActions, nextEndActions);
     if (actErr) return res.status(400).json({ ok: false, error: actErr });
 
@@ -272,9 +279,16 @@ async function updateSchedule(req, res) {
 
     $set.updatedAt = now;
 
-    await schedulesCol.updateOne({ _id, user_id: userMongoId }, { $set });
+    if ($set.enabled === true) $set.disabledReason = null;
+    await schedulesCol.updateOne({ _id }, { $set });
+    await logActivity(db, {
+      deviceId: existing.deviceId,
+      actor: actorFromReq(req),
+      action: "schedule.update",
+      details: { scheduleId: String(_id), name: $set.name || existing.name, changed: Object.keys($set).filter((k) => k !== "updatedAt") },
+    });
 
-    const updated = await schedulesCol.findOne({ _id, user_id: userMongoId });
+    const updated = await schedulesCol.findOne({ _id });
     return res.json({ ok: true, schedule: updated });
   } catch (e) {
     return sendServerError(res, e, "schedules");
@@ -297,11 +311,14 @@ async function deleteSchedule(req, res) {
     if (!_id) return res.status(400).json({ ok: false, error: "Invalid scheduleId" });
 
     const schedulesCol = db.collection("device_schedules");
-    const result = await schedulesCol.deleteOne({ _id, user_id: userMongoId });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ ok: false, error: "Schedule not found" });
+    const existing = await schedulesCol.findOne({ _id });
+    if (!existing) return res.status(404).json({ ok: false, error: "Schedule not found" });
+    const access = await deviceFor(db, existing.deviceId, userMongoId, "manager");
+    if (access.error) {
+      return access.status === 404 ? res.status(404).json({ ok: false, error: "Schedule not found" }) : deny(res, access);
     }
+    await schedulesCol.deleteOne({ _id });
+    await logActivity(db, { deviceId: existing.deviceId, actor: actorFromReq(req), action: "schedule.delete", details: { scheduleId, name: existing.name } });
 
     return res.json({ ok: true, deleted: true, scheduleId });
   } catch (e) {

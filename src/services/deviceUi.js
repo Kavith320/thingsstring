@@ -1,6 +1,7 @@
 // src/services/deviceUi.js
 // Per-user display settings for a device (name, icon, colour, which values show
-// on the card, location). Stored in `device_ui` with _id = deviceId, separate
+// on the card, location). Stored in `device_ui` with _id = "<userId>:<deviceId>" (each
+// member of a shared device has their own), separate
 // from device_config so a device reboot (config re-publish) never wipes them.
 
 const { isPlainObject, isSafeKey } = require("../utils/http");
@@ -33,9 +34,30 @@ async function loadUiMap(db, userId, deviceIds) {
   if (!deviceIds.length) return new Map();
   const docs = await db
     .collection("device_ui")
-    .find({ _id: { $in: deviceIds }, user_id: String(userId) })
+    .find({ user_id: String(userId), deviceId: { $in: deviceIds } })
     .toArray();
-  return new Map(docs.map((d) => [d._id, serializeUi(d)]));
+  return new Map(docs.map((d) => [d.deviceId, serializeUi(d)]));
+}
+
+const uiId = (userId, deviceId) => `${userId}:${deviceId}`;
+
+/**
+ * One-time migration: early versions keyed device_ui by deviceId alone (one owner per
+ * device). Re-key those docs to "<userId>:<deviceId>". Safe to run on every startup.
+ */
+async function migrateDeviceUiKeys(db) {
+  const col = db.collection("device_ui");
+  const old = await col.find({ deviceId: { $exists: false } }).toArray();
+  for (const d of old) {
+    if (!d.user_id) {
+      await col.deleteOne({ _id: d._id });
+      continue;
+    }
+    const { _id, ...rest } = d;
+    await col.updateOne({ _id: uiId(d.user_id, _id) }, { $setOnInsert: { ...rest, deviceId: _id } }, { upsert: true });
+    await col.deleteOne({ _id });
+  }
+  if (old.length) console.log(`🗂️ Migrated ${old.length} device_ui document(s) to per-user keys`);
 }
 
 /**
@@ -111,4 +133,4 @@ function validateUiPatch(body) {
   return { $set, iconRefs };
 }
 
-module.exports = { serializeUi, loadUiMap, validateUiPatch, validateLocation };
+module.exports = { serializeUi, loadUiMap, validateUiPatch, validateLocation, uiId, migrateDeviceUiKeys };

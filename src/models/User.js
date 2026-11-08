@@ -31,6 +31,12 @@ const userSchema = new mongoose.Schema(
     // "avatar:robot-3" (built-in set), "emoji:🦊", or "file:<id>" (uploaded, served at /files/<id>)
     avatar: { type: String, default: null },
 
+    // Optional notification emails (security and account notices are always sent)
+    notifications: {
+      deviceOffline: { type: Boolean, default: true },
+      automation: { type: Boolean, default: true },
+    },
+
     preferences: {
       theme: { type: String, enum: ["light", "dark", "system"], default: "system" },
       accentColor: { type: String, default: null },

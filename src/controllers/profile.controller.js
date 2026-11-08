@@ -7,6 +7,7 @@ const { sendServerError } = require("../utils/http");
 const { buildAppToken, preferencesOf, SALT_ROUNDS } = require("./auth.controller");
 const { saveImage, deleteFiles, fileIdFromRef } = require("../services/fileStore");
 const { enqueueEmail } = require("../email/outbox");
+const { notificationsOf, verifyUnsubscribeToken, OPTIONAL_CATEGORIES } = require("../email/notify");
 const {
   fail,
   optString,
@@ -35,6 +36,7 @@ function profileOf(user) {
     bio: user.bio || null,
     avatar: user.avatar || null,
     preferences: preferencesOf(user),
+    notifications: notificationsOf(user),
     createdAt: user.createdAt,
   };
 }
@@ -187,4 +189,56 @@ async function removeAvatar(req, res) {
   }
 }
 
-module.exports = { getProfile, updateProfile, updatePreferences, changePassword, uploadAvatar, removeAvatar };
+// GET /api/me/notifications
+async function getNotifications(req, res) {
+  try {
+    return res.json({ ok: true, notifications: notificationsOf(await loadUser(req)) });
+  } catch (e) {
+    return handle(res, e, "get notifications");
+  }
+}
+
+// PATCH /api/me/notifications  { deviceOffline?: bool, automation?: bool }
+async function updateNotifications(req, res) {
+  try {
+    const body = requireObject(req.body);
+    const $set = {};
+    for (const k of OPTIONAL_CATEGORIES) {
+      if (body[k] === undefined) continue;
+      if (typeof body[k] !== "boolean") fail(`'${k}' must be true or false`);
+      $set[`notifications.${k}`] = body[k];
+    }
+    if (!Object.keys($set).length) fail(`Nothing to update (fields: ${OPTIONAL_CATEGORIES.join(", ")})`);
+    const user = await User.findByIdAndUpdate(req.user.id, { $set }, { new: true });
+    if (!user) fail("User not found");
+    return res.json({ ok: true, notifications: notificationsOf(user) });
+  } catch (e) {
+    return handle(res, e, "update notifications");
+  }
+}
+
+// POST /api/auth/unsubscribe  { token }   (no login: opened from the email link)
+async function unsubscribe(req, res) {
+  try {
+    const t = verifyUnsubscribeToken(req.body?.token);
+    if (!t) return res.status(400).json({ ok: false, error: "This unsubscribe link is invalid" });
+    if (t.deviceId) {
+      // Offline alerts are per device: the link turns off just this device's alerts
+      const r = await getDb()
+        .collection("device_alerts")
+        .updateOne({ _id: `${t.userId}:${t.deviceId}` }, { $set: { "offline.enabled": false, state: null, updatedAt: new Date() } });
+      return res.json({ ok: true, category: t.category, deviceId: t.deviceId, changed: r.modifiedCount > 0 });
+    }
+    const user = await User.findByIdAndUpdate(t.userId, { $set: { [`notifications.${t.category}`]: false } }, { new: true });
+    if (!user) return res.status(400).json({ ok: false, error: "This unsubscribe link is invalid" });
+    return res.json({ ok: true, category: t.category, notifications: notificationsOf(user) });
+  } catch (e) {
+    return handle(res, e, "unsubscribe");
+  }
+}
+
+module.exports = {
+  getNotifications,
+  updateNotifications,
+  unsubscribe,
+  getProfile, updateProfile, updatePreferences, changePassword, uploadAvatar, removeAvatar };

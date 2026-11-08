@@ -80,6 +80,13 @@ The backend now supports explicit comparison logic.
 
 ---
 
+### F. "Email me" and alert-only rules
+- Add a toggle **"Email me when this runs"**, which sends `notify: { email: true }`.
+- A rule may have **no action** when the toggle is on: send `action: null`. Use this for alerts like "email me if temperature > 40". The response then has `action: null`.
+- The owner gets at most one email per rule per 15 minutes. They can turn automation emails off in **Settings → Notifications** (`PATCH /api/me/notifications { automation: false }`).
+
+---
+
 ## 4. Error Handling
 The backend will never return an empty `{}` for errors. You should expect:
 ```json

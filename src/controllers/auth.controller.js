@@ -84,12 +84,30 @@ async function register(req, res) {
       emailVerified: false,
     });
 
-    // Lazy require: email.controller imports this file
-    await require("./email.controller")
-      .queueVerificationEmail(user)
-      .catch((e) => console.error("❌ Could not queue verification email:", e.message));
+    // Signing up from an invitation link: the link proves the inbox, so the account is
+    // verified straight away (no verification email, which also saves email quota) and
+    // the invitation is accepted.
+    let invite = null;
+    if (typeof req.body.inviteToken === "string") {
+      const { getDb } = require("../db/mongo");
+      const { findInviteByToken, acceptInvite } = require("../services/invites");
+      const found = await findInviteByToken(getDb(), req.body.inviteToken);
+      if (found && found.email === normEmail) {
+        user.emailVerified = true;
+        await user.save();
+        const r = await acceptInvite(getDb(), found, user);
+        invite = r.ok ? { deviceId: r.deviceId, role: r.role } : { error: r.error };
+      }
+    }
 
-    return res.status(201).json({ ok: true, token: buildAppToken(user), user: userPayload(user) });
+    if (!user.emailVerified) {
+      // Lazy require: email.controller imports this file
+      await require("./email.controller")
+        .queueVerificationEmail(user)
+        .catch((e) => console.error("❌ Could not queue verification email:", e.message));
+    }
+
+    return res.status(201).json({ ok: true, token: buildAppToken(user), user: userPayload(user), ...(invite ? { invite } : {}) });
   } catch (e) {
     if (e && e.code === 11000) {
       return res.status(409).json({ ok: false, error: "Email or userId already exists" });

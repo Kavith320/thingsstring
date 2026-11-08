@@ -17,6 +17,8 @@ const rawImage = express.raw({ type: "*/*", limit: MAX_IMAGE_BYTES });
 router.get("/", requireAuth, c.getProfile);
 router.patch("/", requireAuth, c.updateProfile);
 router.patch("/preferences", requireAuth, c.updatePreferences);
+router.get("/notifications", requireAuth, c.getNotifications);
+router.patch("/notifications", requireAuth, c.updateNotifications);
 router.put("/password", requireAuth, passwordLimit, c.changePassword);
 const emailChangeLimit = rateLimit({ windowMs: 60 * MIN, max: 5, key: byUser("email-change") });
 router.post("/email", requireAuth, emailChangeLimit, requestEmailChange);

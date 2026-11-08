@@ -35,6 +35,7 @@ router.use(requireAuth, requireAdmin);
 // System Health & Stats
 router.get("/stats", getSystemStats);
 router.get("/health", getSystemHealth);
+router.get("/email/stats", require("../controllers/admin.controller").getEmailStats);
 
 // User Management & Access Control
 router.get("/users", getAllUsers);
