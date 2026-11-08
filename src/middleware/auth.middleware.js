@@ -18,7 +18,7 @@ async function requireAuth(req, res, next) {
   }
 
   try {
-    const user = await User.findById(decoded.sub).select("role isActive status email userId8 tokenVersion");
+    const user = await User.findById(decoded.sub).select("role isActive status email emailVerified userId8 tokenVersion");
     if (!user) {
       return res.status(401).json({ ok: false, error: "User account no longer exists" });
     }
@@ -38,6 +38,7 @@ async function requireAuth(req, res, next) {
       email: user.email,
       role: user.role,
       userId8: user.userId8,
+      emailVerified: !!user.emailVerified,
     };
     return next();
   } catch (e) {
@@ -46,4 +47,10 @@ async function requireAuth(req, res, next) {
   }
 }
 
-module.exports = { requireAuth };
+/** Use after requireAuth on actions that need a proven email (e.g. sharing devices). */
+function requireVerifiedEmail(req, res, next) {
+  if (req.user?.emailVerified) return next();
+  return res.status(403).json({ ok: false, error: "Please verify your email address first", code: "EMAIL_NOT_VERIFIED" });
+}
+
+module.exports = { requireAuth, requireVerifiedEmail };

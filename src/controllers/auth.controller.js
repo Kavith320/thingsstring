@@ -31,6 +31,7 @@ function userPayload(user) {
     email: user.email,
     role: user.role,
     authProvider: user.authProvider,
+    emailVerified: !!user.emailVerified,
     avatar: user.avatar || null,
     preferences: preferencesOf(user),
   };
@@ -82,6 +83,11 @@ async function register(req, res) {
       authProvider: "local",
       emailVerified: false,
     });
+
+    // Lazy require: email.controller imports this file
+    await require("./email.controller")
+      .queueVerificationEmail(user)
+      .catch((e) => console.error("❌ Could not queue verification email:", e.message));
 
     return res.status(201).json({ ok: true, token: buildAppToken(user), user: userPayload(user) });
   } catch (e) {
@@ -159,7 +165,8 @@ async function googleAuth(req, res) {
     if (!email || !googleId) return res.status(401).json({ ok: false, error: "Invalid Google token" });
     if (!emailVerified) return res.status(401).json({ ok: false, error: "Google email not verified" });
 
-    let user = await User.findOne({ email });
+    // The Google account id is the stable link (it survives an email change in ThingsString)
+    let user = (await User.findOne({ googleId })) || (await User.findOne({ email }));
 
     if (!user) {
       const userId8 = await generateUniqueUserId8();

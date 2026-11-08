@@ -64,6 +64,13 @@ async function ensureIndexes(db) {
     db.collection("device_groups").createIndex({ deviceIds: 1 }),
     db.collection("files").createIndex({ user_id: 1, kind: 1 }),
 
+    // Email: one-time tokens expire on their own; the outbox keeps 30 days of history
+    ensureTtlIndex(db, "email_tokens", "expiresAt", 0),
+    db.collection("email_tokens").createIndex({ userId: 1, purpose: 1 }),
+    db.collection("email_outbox").createIndex({ status: 1, nextAttemptAt: 1 }),
+    db.collection("email_outbox").createIndex({ dedupeKey: 1, createdAt: -1 }, { sparse: true }),
+    ensureTtlIndex(db, "email_outbox", "createdAt", 30 * 86400),
+
     // Admin audit trail (kept forever)
     db.collection("admin_audit_logs").createIndex({ timestamp: -1 }),
   ];

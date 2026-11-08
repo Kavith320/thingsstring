@@ -11,7 +11,8 @@
     "automation-worker": "nodemon src/automation/worker.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "backup-telemetry": "node scripts/backup_and_cleanup_telemetry.js",
-    "backup-db": "node scripts/backup_full_db.js"
+    "backup-db": "node scripts/backup_full_db.js",
+    "email:test": "node scripts/send_test_email.js"
   },
   "keywords": [],
   "author": "",
@@ -28,7 +29,8 @@
     "jsonwebtoken": "^9.0.3",
     "moment-timezone": "^0.6.0",
     "mongoose": "^9.0.2",
-    "mqtt": "^5.14.1"
+    "mqtt": "^5.14.1",
+    "nodemailer": "^10.4.0"
   },
   "devDependencies": {
     "mongodb-memory-server": "^10.4.3",

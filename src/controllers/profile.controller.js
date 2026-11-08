@@ -6,6 +6,7 @@ const { getDb } = require("../db/mongo");
 const { sendServerError } = require("../utils/http");
 const { buildAppToken, preferencesOf, SALT_ROUNDS } = require("./auth.controller");
 const { saveImage, deleteFiles, fileIdFromRef } = require("../services/fileStore");
+const { enqueueEmail } = require("../email/outbox");
 const {
   fail,
   optString,
@@ -149,6 +150,9 @@ async function changePassword(req, res) {
     user.passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
     user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
+    await enqueueEmail(getDb(), { to: user.email, template: "passwordChanged", data: { name: user.name } }).catch((e) =>
+      console.error("❌ Could not queue password-changed email:", e.message)
+    );
 
     return res.json({ ok: true, message: "Password changed. Other sessions were logged out.", token: buildAppToken(user) });
   } catch (e) {
