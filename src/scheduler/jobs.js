@@ -1,6 +1,7 @@
 // src/scheduler/jobs.js
 const { getDb } = require("../db/mongo");
 const { getDeviceOnlineState, isAutoMode } = require("../services/deviceState");
+const { logActivity } = require("../services/activity");
 
 /**
  * Apply schedule actions to device_control.
@@ -13,7 +14,7 @@ const { getDeviceOnlineState, isAutoMode } = require("../services/deviceState");
  *
  * Returns a short result string (used by tests and logs).
  */
-async function applyActions(deviceId, actions, { phase = "start" } = {}) {
+async function applyActions(deviceId, actions, { phase = "start", scheduleId = null, scheduleName = null } = {}) {
   const db = getDb();
   const controlCol = db.collection("device_control");
   const tag = phase === "end" ? "END" : "START";
@@ -66,7 +67,21 @@ async function applyActions(deviceId, actions, { phase = "start" } = {}) {
 
   await controlCol.updateOne({ _id: deviceId }, { $set }, { upsert: true });
   console.log(`✅ [SCHEDULER] ${tag}: device_control updated for device ${deviceId}`);
+  await logActivity(db, {
+    deviceId,
+    actor: { type: "schedule", id: scheduleId ? String(scheduleId) : null, name: scheduleName },
+    action: "control.update",
+    details: { phase, set: $set },
+  });
   return "applied";
+}
+
+async function scheduleNameOf(scheduleId) {
+  const { parseObjectId } = require("../utils/http");
+  const _id = parseObjectId(String(scheduleId || ""));
+  if (!_id) return null;
+  const s = await getDb().collection("device_schedules").findOne({ _id }, { projection: { name: 1 } });
+  return s?.name || null;
 }
 
 /**
@@ -78,7 +93,8 @@ function defineJobs(agenda) {
     const { scheduleId, deviceId, actions, end_actions, duration_sec } = job.attrs.data || {};
     console.log(`⏰ [SCHEDULER] START schedule=${scheduleId} device=${deviceId} at ${new Date().toISOString()}`);
 
-    const result = await applyActions(deviceId, actions, { phase: "start" });
+    const scheduleName = await scheduleNameOf(scheduleId);
+    const result = await applyActions(deviceId, actions, { phase: "start", scheduleId, scheduleName });
 
     // Only schedule an END if the START actually changed something
     if (result === "applied" && duration_sec && Array.isArray(end_actions) && end_actions.length > 0) {
@@ -97,7 +113,7 @@ function defineJobs(agenda) {
   agenda.define("run-device-schedule-end", async (job) => {
     const { scheduleId, deviceId, end_actions } = job.attrs.data || {};
     console.log(`⏰ [SCHEDULER] END schedule=${scheduleId} device=${deviceId} at ${new Date().toISOString()}`);
-    await applyActions(deviceId, end_actions, { phase: "end" });
+    await applyActions(deviceId, end_actions, { phase: "end", scheduleId, scheduleName: await scheduleNameOf(scheduleId) });
     // One-off job: remove it once done so finished END jobs don't pile up
     await job.remove().catch(() => {});
   });

@@ -4,6 +4,7 @@
 
 const TELEMETRY_TTL_DAYS = 7;
 const AUTOMATION_LOG_TTL_DAYS = 30;
+const { ACTIVITY_TTL_DAYS } = require("../services/activity");
 
 /**
  * Create a TTL index, or adjust its expiry in place (collMod) when it already
@@ -36,6 +37,13 @@ async function ensureTtlIndex(db, collection, field, expireAfterSeconds, { adjus
 }
 
 async function ensureIndexes(db) {
+  // Data migrations that must run before the indexes they rely on
+  try {
+    await require("../services/deviceUi").migrateDeviceUiKeys(db);
+  } catch (e) {
+    console.error("⚠️ device_ui migration failed:", e.message);
+  }
+
   const tasks = [
     // Latest telemetry per device (used everywhere) + 7-day retention
     db.collection("device_telemetry").createIndex({ deviceId: 1, _id: -1 }),
@@ -59,7 +67,8 @@ async function ensureIndexes(db) {
     db.collection("device_schedules").createIndex({ enabled: 1 }),
 
     // Personalisation
-    db.collection("device_ui").createIndex({ user_id: 1 }),
+    db.collection("device_ui").createIndex({ user_id: 1, deviceId: 1 }),
+    db.collection("device_ui").createIndex({ deviceId: 1 }),
     db.collection("device_groups").createIndex({ user_id: 1, order: 1 }),
     db.collection("device_groups").createIndex({ deviceIds: 1 }),
     db.collection("files").createIndex({ user_id: 1, kind: 1 }),
@@ -69,7 +78,22 @@ async function ensureIndexes(db) {
     db.collection("email_tokens").createIndex({ userId: 1, purpose: 1 }),
     db.collection("email_outbox").createIndex({ status: 1, nextAttemptAt: 1 }),
     db.collection("email_outbox").createIndex({ dedupeKey: 1, createdAt: -1 }, { sparse: true }),
+    db.collection("email_outbox").createIndex({ userId: 1, createdAt: -1 }),
     ensureTtlIndex(db, "email_outbox", "createdAt", 30 * 86400),
+
+    // Sharing, invitations, alert settings, activity history
+    db.collection("device_access").createIndex({ deviceId: 1, userId: 1 }, { unique: true }),
+    db.collection("device_access").createIndex({ userId: 1 }),
+    db.collection("device_invites").createIndex({ tokenHash: 1 }, { unique: true }),
+    db.collection("device_invites").createIndex({ deviceId: 1, status: 1 }),
+    db.collection("device_invites").createIndex({ email: 1, status: 1 }),
+    db.collection("device_invites").createIndex({ invitedBy: 1, createdAt: -1 }),
+    ensureTtlIndex(db, "device_invites", "expiresAt", 30 * 86400),
+    db.collection("device_alerts").createIndex({ "offline.enabled": 1 }),
+    db.collection("device_alerts").createIndex({ deviceId: 1 }),
+    db.collection("device_activity").createIndex({ deviceId: 1, ts: -1 }),
+    ensureTtlIndex(db, "device_activity", "ts", ACTIVITY_TTL_DAYS * 86400),
+    db.collection("email_outbox").createIndex({ status: 1, sentAt: -1 }),
 
     // Admin audit trail (kept forever)
     db.collection("admin_audit_logs").createIndex({ timestamp: -1 }),

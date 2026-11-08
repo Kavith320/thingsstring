@@ -4,6 +4,10 @@ const { getDb, isMongoConnected } = require("../db/mongo");
 const { getMqttClient } = require("../mqtt/client");
 const { publishControl } = require("../services/controlPublisher");
 const { deleteFiles } = require("../services/fileStore");
+const { notifyUser, deviceDisplayName } = require("../email/notify");
+const { cleanupUserDeviceAccess } = require("../services/deviceAccess");
+const { logActivity, actorFromReq } = require("../services/activity");
+const { budget } = require("../email/budget");
 const { logAdminAction } = require("../services/auditLogger");
 const { buildControlSet } = require("./devices.controller");
 const { backupFullDatabase } = require("../../scripts/backup_full_db");
@@ -54,14 +58,50 @@ async function deleteFlowsTouching(db, deviceIds) {
  */
 async function removePersonalisation(db, { userId, deviceIds = [] }) {
   if (deviceIds.length) {
-    await db.collection("device_ui").deleteMany({ _id: { $in: deviceIds } });
+    // Everyone's settings for these devices, and all sharing: a deleted or transferred
+    // device starts clean for its (new) owner
+    await db.collection("device_ui").deleteMany({ deviceId: { $in: deviceIds } });
     await db.collection("device_groups").updateMany({ deviceIds: { $in: deviceIds } }, { $pull: { deviceIds: { $in: deviceIds } } });
+    await db.collection("device_access").deleteMany({ deviceId: { $in: deviceIds } });
+    await db.collection("device_alerts").deleteMany({ deviceId: { $in: deviceIds } });
+    await db.collection("device_activity").deleteMany({ deviceId: { $in: deviceIds } });
+    await db
+      .collection("device_invites")
+      .updateMany({ deviceId: { $in: deviceIds }, status: "pending" }, { $set: { status: "revoked", revokedReason: "device removed or transferred" } });
   }
   if (userId) {
+    // Devices other people shared with this user
+    const shared = await db.collection("device_access").find({ userId }, { projection: { deviceId: 1 } }).toArray();
+    await cleanupUserDeviceAccess(db, userId, shared.map((s) => s.deviceId), "user deleted");
+    await db.collection("device_alerts").deleteMany({ userId });
+    await db.collection("device_invites").updateMany({ invitedBy: userId, status: "pending" }, { $set: { status: "revoked", revokedReason: "inviter deleted" } });
     await db.collection("device_ui").deleteMany({ user_id: userId });
     await db.collection("device_groups").deleteMany({ user_id: userId });
     await db.collection("dashboards").deleteOne({ _id: userId });
     await deleteFiles(db, { user_id: userId });
+  }
+}
+
+// GET /api/admin/email/stats — free-tier quota usage
+async function getEmailStats(req, res) {
+  try {
+    const db = getDb();
+    const since = new Date(Date.now() - 24 * 3600e3);
+    const col = db.collection("email_outbox");
+    const [b, failed24h, byCategory] = await Promise.all([
+      budget(db),
+      col.countDocuments({ status: "failed", createdAt: { $gte: since } }),
+      col.aggregate([{ $match: { status: "sent", sentAt: { $gte: since } } }, { $group: { _id: "$category", n: { $sum: 1 } } }]).toArray(),
+    ]);
+    return res.json({
+      ok: true,
+      window: "last 24 hours",
+      ...b,
+      failed24h,
+      sentByCategory: Object.fromEntries(byCategory.map((c) => [c._id || "other", c.n])),
+    });
+  } catch (e) {
+    return sendServerError(res, e, "admin email stats");
   }
 }
 
@@ -357,6 +397,7 @@ async function resetUserPassword(req, res) {
     if (!user) return res.status(404).json({ ok: false, error: "User not found" });
 
     await audit(req, "USER_PASSWORD_RESET", userId, { userEmail: user.email });
+    await notifyUser(getDb(), { userId, category: "account", template: "adminPasswordReset" });
     return res.json({ ok: true, message: "User password reset successfully" });
   } catch (e) {
     return sendServerError(res, e, "admin reset password");
@@ -370,7 +411,7 @@ async function toggleDeviceLockout(req, res) {
     const { disabled, reason } = req.body || {};
     const configCol = getDb().collection("device_config");
 
-    const device = await configCol.findOne({ _id: deviceId }, { projection: { isDisabled: 1 } });
+    const device = await configCol.findOne({ _id: deviceId }, { projection: { isDisabled: 1, device: 1, user_id: 1 } });
     if (!device) return res.status(404).json({ ok: false, error: "Device not found" });
 
     const isDisabled = disabled !== undefined ? Boolean(disabled) : !device.isDisabled;
@@ -382,6 +423,17 @@ async function toggleDeviceLockout(req, res) {
     );
 
     await audit(req, isDisabled ? "DEVICE_LOCKOUT" : "DEVICE_UNLOCK", deviceId, { reason: disabledReason });
+    await logActivity(getDb(), { deviceId, actor: actorFromReq(req, "admin"), action: isDisabled ? "admin.lock" : "admin.unlock", details: { reason: disabledReason } });
+    if (!!device.isDisabled !== isDisabled) {
+      const ownerId = device.device?.user_id || device.user_id;
+      const { name } = await deviceDisplayName(getDb(), deviceId, ownerId);
+      await notifyUser(getDb(), {
+        userId: ownerId,
+        category: "account",
+        template: isDisabled ? "deviceLocked" : "deviceUnlocked",
+        data: { deviceId, deviceName: name, reason: disabledReason },
+      });
+    }
     return res.json({
       ok: true,
       message: `Device ${deviceId} has been ${isDisabled ? "LOCKED OUT" : "UNLOCKED"}`,
@@ -472,9 +524,17 @@ async function setUserStatus(req, res) {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ ok: false, error: "User not found" });
 
+    const wasActive = user.status !== "disabled" && user.isActive !== false;
+    // Email before suspending: notifyUser skips suspended accounts
+    if (wasActive && status === "disabled") {
+      await notifyUser(getDb(), { userId, category: "account", template: "accountSuspended" });
+    }
     user.status = status;
     user.isActive = status === "active";
     await user.save();
+    if (!wasActive && status === "active") {
+      await notifyUser(getDb(), { userId, category: "account", template: "accountReactivated" });
+    }
 
     await audit(req, "USER_STATUS_UPDATE", userId, { newStatus: status, userEmail: user.email });
     return res.json({
@@ -508,6 +568,7 @@ async function transferDeviceOwnership(req, res) {
 
     const previousOwnerId = device.device?.user_id || null;
     const newOwnerId = String(targetUser._id);
+    const oldName = previousOwnerId ? (await deviceDisplayName(db, deviceId, previousOwnerId)).name : deviceId;
 
     // Both owner fields are set; the MQTT ingest keeps them even when the device reboots
     await configCol.updateOne(
@@ -520,6 +581,13 @@ async function transferDeviceOwnership(req, res) {
     const schedules = previousOwnerId !== newOwnerId ? await db.collection("device_schedules").deleteMany({ deviceId }) : { deletedCount: 0 };
     // The old owner's names, location and groups for this device go too (privacy)
     if (previousOwnerId !== newOwnerId) await removePersonalisation(db, { deviceIds: [deviceId] });
+
+    if (previousOwnerId !== newOwnerId) {
+      if (previousOwnerId) {
+        await notifyUser(db, { userId: previousOwnerId, category: "account", template: "deviceTransferredAway", data: { deviceId, deviceName: oldName } });
+      }
+      await notifyUser(db, { userId: newOwnerId, category: "account", template: "deviceTransferredIn", data: { deviceId } });
+    }
 
     await audit(req, "DEVICE_TRANSFER", deviceId, {
       previousOwnerId,
@@ -681,6 +749,7 @@ async function getAuditLogs(req, res) {
 }
 
 module.exports = {
+  getEmailStats,
   getSystemStats,
   getAllUsers,
   deleteUser,

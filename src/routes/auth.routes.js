@@ -30,5 +30,6 @@ router.post("/verify-email", tokenPerIp, emailCtl.verifyEmail);
 router.post("/forgot-password", forgotPerIp, forgotPerEmail, emailCtl.forgotPassword);
 router.post("/reset-password", tokenPerIp, emailCtl.resetPassword);
 router.post("/confirm-email", tokenPerIp, emailCtl.confirmEmailChange);
+router.post("/unsubscribe", tokenPerIp, require("../controllers/profile.controller").unsubscribe);
 
 module.exports = router;

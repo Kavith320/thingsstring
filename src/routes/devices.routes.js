@@ -1,5 +1,6 @@
 const router = require("express").Router();
-const { requireAuth } = require("../middleware/auth.middleware");
+const { requireAuth, requireVerifiedEmail } = require("../middleware/auth.middleware");
+const share = require("../controllers/sharing.controller");
 const { rateLimit } = require("../middleware/rateLimit");
 const {
   listMyDevices,
@@ -24,6 +25,16 @@ const exportLimit = rateLimit({
 router.get("/:deviceId/telemetry/export", requireAuth, exportLimit, exportDeviceTelemetryCsv);
 router.post("/:deviceId/control", requireAuth, updateDeviceControl);
 router.get("/:deviceId/ui", requireAuth, getDeviceUi);
+
+// Sharing (members + invitations), personal alert settings, activity history
+router.get("/:deviceId/members", requireAuth, share.listMembers);
+router.patch("/:deviceId/members/:userId", requireAuth, share.changeMemberRole);
+router.delete("/:deviceId/members/:userId", requireAuth, share.removeMember);
+router.post("/:deviceId/invites", requireAuth, requireVerifiedEmail, share.createInvite);
+router.delete("/:deviceId/invites/:inviteId", requireAuth, share.cancelInvite);
+router.get("/:deviceId/alerts", requireAuth, share.getAlerts);
+router.put("/:deviceId/alerts", requireAuth, share.updateAlerts);
+router.get("/:deviceId/activity", requireAuth, share.getActivity);
 router.patch("/:deviceId/ui", requireAuth, updateDeviceUi);
 
 module.exports = router;

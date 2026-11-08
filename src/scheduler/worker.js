@@ -10,6 +10,7 @@ const { startScheduleSync } = require("./scheduleSync");
 const { getDb } = require("../db/mongo");
 const { startOutboxLoop } = require("../email/outbox");
 const { verifyMailer, closeMailer } = require("../email/mailer");
+const { startWatchdog } = require("../services/deviceWatchdog");
 
 async function startWorker() {
   await connectMongo();
@@ -28,12 +29,15 @@ async function startWorker() {
   // 📧 Email sender: drains email_outbox (queued by the API)
   await verifyMailer();
   const stopOutbox = startOutboxLoop(getDb(), { intervalMs: 5000 });
+  // 🐶 Device offline / back-online alerts
+  const stopWatchdog = startWatchdog(getDb(), { intervalMs: 60000 });
   console.log("🧠 Scheduler worker started");
 
   async function graceful() {
     console.log("🧠 Scheduler worker shutting down...");
     clearInterval(timer);
     stopOutbox();
+    stopWatchdog();
     closeMailer();
     await agenda.stop();
     await agenda.close();

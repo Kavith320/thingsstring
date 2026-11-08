@@ -57,7 +57,7 @@ test("flow is blocked when its owner no longer owns the target device", async ()
   const id = await addFlow({ action: { deviceId: "victim", actuatorKey: "relay1", setValue: true } });
   await runFlow(db, id);
   assert.equal((await relay("victim")).state, undefined);
-  assert.equal((await lastLog()).reason, "flow owner does not own device");
+  assert.equal((await lastLog()).reason, "flow owner has no access to the device");
 });
 
 test("offline sensor, locked target and manual mode are all skipped", async () => {

@@ -1,7 +1,13 @@
 // src/controllers/devices.controller.js
 const { getDb } = require("../db/mongo");
+const { ObjectId } = require("mongoose").mongo;
 const { publishControl } = require("../services/controlPublisher");
-const { findOwnedDevice, statusFromTelemetry } = require("../services/deviceState");
+const { statusFromTelemetry } = require("../services/deviceState");
+const { requireDeviceRole, accessibleDevices, ownerOf } = require("../services/deviceAccess");
+const { logActivity, actorFromReq } = require("../services/activity");
+
+/** Send the { status, error } from requireDeviceRole. */
+const denied = (res, a) => res.status(a.status).json({ ok: false, error: a.error, ...(a.code ? { code: a.code } : {}) });
 const { loadUiMap, serializeUi } = require("../services/deviceUi");
 const { sendServerError, isPlainObject, isSafeKey, clampInt } = require("../utils/http");
 const { TELEMETRY_TTL_DAYS } = require("../db/indexes");
@@ -15,8 +21,19 @@ async function latestTelemetry(db, deviceId) {
 async function listMyDevices(req, res) {
   try {
     const db = getDb();
-    const configs = await db.collection("device_config").find({ "device.user_id": req.user.id }).toArray();
+    const roles = await accessibleDevices(db, req.user.id);
+    const configs = await db.collection("device_config").find({ _id: { $in: [...roles.keys()] } }).toArray();
     const ids = configs.map((c) => c._id);
+
+    // Shared devices show who shared them
+    const ownerIds = [...new Set(configs.filter((c) => roles.get(c._id) !== "owner").map(ownerOf).filter(Boolean))];
+    const owners = ownerIds.length
+      ? await db
+          .collection("users")
+          .find({ _id: { $in: ownerIds.map((id) => new ObjectId(id)) } }, { projection: { name: 1, email: 1 } })
+          .toArray()
+      : [];
+    const ownerById = new Map(owners.map((u) => [String(u._id), { name: u.name, email: u.email }]));
 
     const [controls, telemetry, uiById] = await Promise.all([
       db.collection("device_control").find({ _id: { $in: ids } }).toArray(),
@@ -27,6 +44,8 @@ async function listMyDevices(req, res) {
 
     const devices = configs.map((cfg, i) => ({
       deviceId: cfg._id,
+      role: roles.get(cfg._id),
+      sharedBy: roles.get(cfg._id) === "owner" ? null : ownerById.get(ownerOf(cfg)) || null,
       config: cfg,
       last_telemetry: telemetry[i] || null,
       control: controlById.get(cfg._id) || null,
@@ -46,19 +65,21 @@ async function getDeviceById(req, res) {
     const db = getDb();
     const { deviceId } = req.params;
 
-    const config = await findOwnedDevice(db, deviceId, req.user.id);
-    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
+    const access = await requireDeviceRole(db, deviceId, req.user.id, "viewer");
+    if (access.error) return denied(res, access);
+    const { config, role } = access;
 
     const [lastTelemetry, control, ui] = await Promise.all([
       latestTelemetry(db, deviceId),
       db.collection("device_control").findOne({ _id: deviceId }),
-      db.collection("device_ui").findOne({ _id: deviceId, user_id: req.user.id }),
+      db.collection("device_ui").findOne({ _id: `${req.user.id}:${deviceId}` }),
     ]);
 
     return res.json({
       ok: true,
       device: {
         deviceId,
+        role,
         config,
         last_telemetry: lastTelemetry,
         control,
@@ -171,8 +192,8 @@ async function getDeviceTelemetry(req, res) {
       if (from > to) return res.status(400).json({ ok: false, error: "'from' must be before 'to'" });
     }
 
-    const config = await findOwnedDevice(db, deviceId, req.user.id);
-    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
+    const access = await requireDeviceRole(db, deviceId, req.user.id, "viewer");
+    if (access.error) return denied(res, access);
 
     const col = db.collection("device_telemetry");
 
@@ -234,8 +255,14 @@ async function exportDeviceTelemetryCsv(req, res) {
     const range = parseRange(req.query);
     if (range.error) return res.status(400).json({ ok: false, error: range.error });
 
-    const config = await findOwnedDevice(db, deviceId, req.user.id);
-    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
+    const access = await requireDeviceRole(db, deviceId, req.user.id, "viewer");
+    if (access.error) return denied(res, access);
+    await logActivity(db, {
+      deviceId,
+      actor: actorFromReq(req),
+      action: "telemetry.export",
+      details: { from: range.from ? range.from.toISOString() : null, to: range.to ? range.to.toISOString() : null },
+    });
 
     // Fix the end now so both passes see the same rows even while new telemetry arrives.
     const to = range.to || new Date();
@@ -293,8 +320,9 @@ async function updateDeviceControl(req, res) {
     const { deviceId } = req.params;
     const controlCol = db.collection("device_control");
 
-    const config = await findOwnedDevice(db, deviceId, req.user.id);
-    if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
+    const access = await requireDeviceRole(db, deviceId, req.user.id, "operator");
+    if (access.error) return denied(res, access);
+    const { config } = access;
 
     if (config.isDisabled) {
       return res.status(403).json({
@@ -312,6 +340,7 @@ async function updateDeviceControl(req, res) {
       { upsert: true, returnDocument: "after" }
     );
     publishControl(deviceId, controlDoc);
+    await logActivity(db, { deviceId, actor: actorFromReq(req), action: "control.update", details: { actuators: req.body.actuators } });
 
     return res.json({ ok: true, deviceId, control: controlDoc });
   } catch (e) {
@@ -326,4 +355,5 @@ module.exports = {
   exportDeviceTelemetryCsv,
   updateDeviceControl,
   buildControlSet,
+  denied,
 };
