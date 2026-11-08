@@ -112,4 +112,13 @@ async function serveFile(db, req, res) {
   });
 }
 
-module.exports = { saveImage, deleteFiles, serveFile, fileIdFromRef, uploadDir, MAX_IMAGE_BYTES };
+/** Read an uploaded file's bytes, or null if it's gone. */
+function readFileSafe(id) {
+  try {
+    return fs.readFileSync(filePath(id));
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { saveImage, deleteFiles, serveFile, fileIdFromRef, uploadDir, readFileSafe, sniffImage, MAX_IMAGE_BYTES };

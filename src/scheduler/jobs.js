@@ -120,6 +120,18 @@ function defineJobs(agenda) {
 
   // 📦 WEEKLY BACKUP & TELEMETRY CLEANUP
   agenda.define("weekly-backup-and-cleanup", async () => {
+    // 1) Weekly reports first, from the data as it is before cleanup. Whatever happens here
+    //    (errors, a slow run, email problems), the backup below always runs: reports are only
+    //    queued here and sent by the outbox, and the step is capped at 10 minutes.
+    try {
+      const { sendWeeklyReports, withTimeout } = require("../services/weeklyReport");
+      const r = await withTimeout(sendWeeklyReports(getDb()), 10 * 60e3, "Weekly reports");
+      console.log(`📊 [SCHEDULER] Weekly reports: ${JSON.stringify(r)}`);
+    } catch (err) {
+      console.error(`❌ [SCHEDULER] Weekly reports failed (backup continues):`, err.message);
+    }
+
+    // 2) Backup and cleanup
     console.log(`📦 [SCHEDULER] Starting scheduled weekly backup & telemetry cleanup at ${new Date().toISOString()}...`);
     const { backupAndCleanupTelemetry } = require("../../scripts/backup_and_cleanup_telemetry");
     try {

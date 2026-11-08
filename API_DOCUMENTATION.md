@@ -95,14 +95,17 @@ These three calls need **no login**: the link may be opened on another device. A
 |---|---|:-:|
 | Device offline / back online | **Per device, off by default.** Each user turns them on per device and picks the delay (2–1440 min). See [SHARING_FRONTEND_GUIDE.md](SHARING_FRONTEND_GUIDE.md) §4 | ✅ per device, and the master switch `deviceOffline` |
 | Automation triggered | A rule with `notify.email: true` fires | ✅ `automation` |
+| **Weekly report** | Every week, just before the weekly backup (Sunday 02:00): an Excel workbook of the user's devices (owned and shared). It has a summary sheet, then **one sheet per device** with the week's activity and daily min/avg/max of each reading. Viewers and operators see "A member" instead of other people's emails. | ✅ `weeklyReport` |
 | Device locked/unlocked, device transferred, account suspended/reactivated, password reset by admin | An admin does it | ❌ |
 | Password changed, email changed | Security notices | ❌ |
 
 | Endpoint | Login | Body |
 |---|:-:|---|
 | `GET /api/me/notifications` | ✅ | — returns `{ ok, notifications: { deviceOffline, automation } }` (also in `GET /api/me`) |
-| `PATCH /api/me/notifications` | ✅ | `{ deviceOffline?: bool, automation?: bool }` |
+| `PATCH /api/me/notifications` | ✅ | `{ deviceOffline?: bool, automation?: bool, weeklyReport?: bool }` |
 | `POST /api/auth/unsubscribe` | — | `{ token }` from the email's "Turn off these emails" link, which opens `APP_URL/unsubscribe?token=…`. An offline-alert link turns off that device's alerts and returns `{ ok, category, deviceId }`. An automation link turns off automation emails and returns `{ ok, category, notifications }`. |
+
+**Device emails** show the device as it looks in the app: its configured name, icon (an uploaded icon is embedded in the email, an emoji shown as-is, and icons from the app's icon set as the device colour with the first letter) and its ID.
 
 **Free-tier email budget:**
 - Emails are limited to `MAIL_DAILY_LIMIT` per rolling 24 h (default 300, Brevo's free plan). The sender never goes over it; extra emails wait.

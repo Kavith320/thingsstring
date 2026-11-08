@@ -183,7 +183,7 @@ test("the unsubscribe link in an offline alert turns off only that device", asyn
 test("notification settings and the unsubscribe link", async () => {
   const alice = await user();
   let r = await app.api("GET", "/api/me/notifications", { token: alice.token });
-  assert.deepEqual(r.body.notifications, { deviceOffline: true, automation: true });
+  assert.deepEqual(r.body.notifications, { deviceOffline: true, automation: true, weeklyReport: true });
   assert.equal((await app.api("PATCH", "/api/me/notifications", { token: alice.token, body: { automation: "no" } })).status, 400);
 
   const token = unsubscribeToken(alice.id, "automation");

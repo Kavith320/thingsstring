@@ -104,13 +104,13 @@ async function checkDevices(db, { now = Date.now() } = {}) {
       const set = {};
       const recently = sub.lastOfflineAlertAt && now - new Date(sub.lastOfflineAlertAt).getTime() < FLAP_WINDOW_MS;
       if (!recently) {
-        const { name } = await deviceDisplayName(db, sub.deviceId, sub.userId);
+        const { name, device } = await deviceDisplayName(db, sub.deviceId);
         const r = await notifyUser(db, {
           userId: sub.userId,
           category: "deviceOffline",
           deviceId: sub.deviceId,
           template: "deviceOffline",
-          data: { deviceId: sub.deviceId, deviceName: name, lastSeen: new Date(lastSeen), afterMin: sub.offline.afterMin },
+          data: { deviceId: sub.deviceId, deviceName: name, device, lastSeen: new Date(lastSeen), afterMin: sub.offline.afterMin },
           dedupeKey: `offline:${sub._id}`,
           dedupeWindowMs: FLAP_WINDOW_MS,
         });
@@ -123,13 +123,13 @@ async function checkDevices(db, { now = Date.now() } = {}) {
       await col.updateOne({ _id: sub._id }, { $set: { state, stateSince: nowDate, ...set } });
     } else if (!offline && sub.state) {
       if (sub.state === "alerted") {
-        const { name } = await deviceDisplayName(db, sub.deviceId, sub.userId);
+        const { name, device } = await deviceDisplayName(db, sub.deviceId);
         const r = await notifyUser(db, {
           userId: sub.userId,
           category: "deviceOffline",
           deviceId: sub.deviceId,
           template: "deviceOnline",
-          data: { deviceId: sub.deviceId, deviceName: name, offlineSince: sub.stateSince },
+          data: { deviceId: sub.deviceId, deviceName: name, device, offlineSince: sub.stateSince },
           dedupeKey: `online:${sub._id}:${new Date(sub.stateSince).getTime()}`,
         });
         if (r.queued) summary.onlineAlerts++;

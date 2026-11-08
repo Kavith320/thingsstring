@@ -61,6 +61,7 @@ router.get("/automation/logs", getGlobalAutomationLogs);
 
 // On-Demand Maintenance & Backups
 router.post("/maintenance/backup", triggerDatabaseBackup);
+router.post("/maintenance/weekly-report", require("../controllers/admin.controller").triggerWeeklyReport);
 router.post("/maintenance/clean-telemetry", triggerTelemetryCleanup);
 
 // Audit Logging

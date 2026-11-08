@@ -12,9 +12,9 @@ const { ObjectId } = require("mongoose").mongo;
 const { enqueueEmail } = require("./outbox");
 const { budget } = require("./budget");
 
-const OPTIONAL = ["deviceOffline", "automation"];
+const OPTIONAL = ["deviceOffline", "automation", "weeklyReport"];
 const ALWAYS = ["account", "security"];
-const DEFAULT_NOTIFICATIONS = Object.freeze({ deviceOffline: true, automation: true });
+const DEFAULT_NOTIFICATIONS = Object.freeze({ deviceOffline: true, automation: true, weeklyReport: true });
 const MAX_ALERTS_PER_HOUR = 20;
 
 function notificationsOf(user) {
@@ -69,7 +69,7 @@ function appUrl(p) {
  * break the automation/watchdog/admin action that triggered it.
  * Returns { queued, reason? }.
  */
-async function notifyUser(db, { userId, category, deviceId = null, template, data = {}, dedupeKey, dedupeWindowMs }) {
+async function notifyUser(db, { userId, category, deviceId = null, template, data = {}, dedupeKey, dedupeWindowMs, attachments = null }) {
   try {
     if (!OPTIONAL.includes(category) && !ALWAYS.includes(category)) throw new Error(`Unknown category '${category}'`);
     if (!userId || !ObjectId.isValid(String(userId))) return { queued: false, reason: "no user" };
@@ -118,6 +118,7 @@ async function notifyUser(db, { userId, category, deviceId = null, template, dat
       category,
       userId: String(user._id),
       headers,
+      attachments,
     });
     return { queued: r.queued, reason: r.queued ? undefined : "duplicate" };
   } catch (e) {
@@ -126,10 +127,14 @@ async function notifyUser(db, { userId, category, deviceId = null, template, dat
   }
 }
 
-/** The device's display name (shared by everyone it's shared with), or its id. */
+/**
+ * How the device looks in the app (same for everyone it's shared with):
+ * { name, device: { deviceId, name, icon, color } } for emails.
+ */
 async function deviceDisplayName(db, deviceId) {
-  const ui = await db.collection("device_ui").findOne({ _id: deviceId }, { projection: { displayName: 1 } });
-  return { name: ui?.displayName || deviceId };
+  const ui = await db.collection("device_ui").findOne({ _id: deviceId }, { projection: { displayName: 1, icon: 1, color: 1 } });
+  const name = ui?.displayName || deviceId;
+  return { name, device: { deviceId, name, icon: ui?.icon || null, color: ui?.color || null } };
 }
 
 module.exports = {

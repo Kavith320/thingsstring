@@ -335,6 +335,18 @@ Executes full MongoDB database dump backup.
 { "daysToKeep": 7 }
 ```
 
+### Send the Weekly Report Now
+`POST /api/admin/maintenance/weekly-report`
+
+**Body (optional):** `{ "userId": "<mongo id>" }` sends the report to that user only, e.g. to check it before Sunday. With no body, every user gets one.
+
+The report also goes out automatically every week, **before** the backup. The backup always runs, even if the reports fail. A user gets at most one report per week, so running this again in the same week sends nothing new.
+
+**Response:** `{ ok, users, queued, skipped, errors }`
+
+### Email Quota Usage
+`GET /api/admin/email/stats` returns `{ limit, reserved, sent24h, queued, remaining, alertsAllowed, sendingAllowed, failed24h, sentByCategory }`.
+
 ## 10. Audit Logging System
 
 ### Get Admin Audit Logs

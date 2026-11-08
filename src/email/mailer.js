@@ -67,7 +67,27 @@ function fromAddress() {
   return process.env.MAIL_FROM || "ThingsString <no-reply@thingsstring.com>";
 }
 
-/** Send one message { to, subject, html, text, headers? }. Resolves with the provider's message id. */
+/** Uploaded device icons referenced as cid:file-<id> in the HTML, embedded like the logo. */
+function deviceIconAttachments(html) {
+  if (typeof html !== "string") return [];
+  const { readFileSafe, sniffImage } = require("../services/fileStore");
+  const ids = [...new Set([...html.matchAll(/cid:file-([a-f0-9]{32})/g)].map((m) => m[1]))];
+  return ids
+    .map((id) => {
+      const content = readFileSafe(id);
+      const contentType = content && sniffImage(content);
+      return contentType ? { filename: `${id}.${contentType.split("/")[1]}`, content, contentType, cid: `file-${id}`, contentDisposition: "inline" } : null;
+    })
+    .filter(Boolean);
+}
+
+/** A stored attachment ({ filename, contentType, content: Buffer | BSON Binary }) as nodemailer wants it. */
+function toAttachment(a) {
+  const content = Buffer.isBuffer(a.content) ? a.content : Buffer.from(a.content?.buffer ?? a.content ?? []);
+  return { filename: a.filename, contentType: a.contentType, content };
+}
+
+/** Send one message { to, subject, html, text, headers?, attachments? }. Resolves with the provider's message id. */
 async function sendMail(msg) {
   const t = getTransporter();
   const message = {
@@ -78,7 +98,11 @@ async function sendMail(msg) {
     html: msg.html,
     text: msg.text,
     headers: msg.headers,
-    attachments: typeof msg.html === "string" && msg.html.includes("cid:ts-logo") ? logoAttachment() : undefined,
+    attachments: [
+      ...(typeof msg.html === "string" && msg.html.includes("cid:ts-logo") ? logoAttachment() : []),
+      ...deviceIconAttachments(msg.html),
+      ...(msg.attachments || []).map(toAttachment),
+    ],
   };
 
   if (!t) {
