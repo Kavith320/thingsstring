@@ -31,7 +31,18 @@ function userPayload(user) {
     email: user.email,
     role: user.role,
     authProvider: user.authProvider,
+    avatar: user.avatar || null,
+    preferences: preferencesOf(user),
   };
+}
+
+const DEFAULT_PREFERENCES = { theme: "system", accentColor: null, language: "en", timezone: null, units: "metric" };
+
+function preferencesOf(user) {
+  const p = user.preferences || {};
+  const out = {};
+  for (const [k, def] of Object.entries(DEFAULT_PREFERENCES)) out[k] = p[k] ?? def;
+  return out;
 }
 
 function isSuspended(user) {
@@ -201,4 +212,4 @@ async function googleAuth(req, res) {
   }
 }
 
-module.exports = { register, login, me, googleAuth };
+module.exports = { register, login, me, googleAuth, buildAppToken, userPayload, preferencesOf, SALT_ROUNDS };

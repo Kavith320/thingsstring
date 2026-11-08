@@ -1,7 +1,8 @@
 // src/controllers/devices.controller.js
 const { getDb } = require("../db/mongo");
 const { publishControl } = require("../services/controlPublisher");
-const { findOwnedDevice } = require("../services/deviceState");
+const { findOwnedDevice, statusFromTelemetry } = require("../services/deviceState");
+const { loadUiMap, serializeUi } = require("../services/deviceUi");
 const { sendServerError, isPlainObject, isSafeKey, clampInt } = require("../utils/http");
 const { TELEMETRY_TTL_DAYS } = require("../db/indexes");
 const { streamTelemetryCsv } = require("../services/telemetryCsv");
@@ -17,9 +18,10 @@ async function listMyDevices(req, res) {
     const configs = await db.collection("device_config").find({ "device.user_id": req.user.id }).toArray();
     const ids = configs.map((c) => c._id);
 
-    const [controls, telemetry] = await Promise.all([
+    const [controls, telemetry, uiById] = await Promise.all([
       db.collection("device_control").find({ _id: { $in: ids } }).toArray(),
       Promise.all(ids.map((id) => latestTelemetry(db, id))),
+      loadUiMap(db, req.user.id, ids),
     ]);
     const controlById = new Map(controls.map((c) => [c._id, c]));
 
@@ -28,6 +30,8 @@ async function listMyDevices(req, res) {
       config: cfg,
       last_telemetry: telemetry[i] || null,
       control: controlById.get(cfg._id) || null,
+      status: statusFromTelemetry(telemetry[i]),
+      ui: uiById.get(cfg._id) || serializeUi(null),
     }));
 
     return res.json({ ok: true, count: devices.length, devices });
@@ -45,14 +49,22 @@ async function getDeviceById(req, res) {
     const config = await findOwnedDevice(db, deviceId, req.user.id);
     if (!config) return res.status(404).json({ ok: false, error: "Device not found" });
 
-    const [lastTelemetry, control] = await Promise.all([
+    const [lastTelemetry, control, ui] = await Promise.all([
       latestTelemetry(db, deviceId),
       db.collection("device_control").findOne({ _id: deviceId }),
+      db.collection("device_ui").findOne({ _id: deviceId, user_id: req.user.id }),
     ]);
 
     return res.json({
       ok: true,
-      device: { deviceId, config, last_telemetry: lastTelemetry, control },
+      device: {
+        deviceId,
+        config,
+        last_telemetry: lastTelemetry,
+        control,
+        status: statusFromTelemetry(lastTelemetry),
+        ui: serializeUi(ui),
+      },
     });
   } catch (e) {
     return sendServerError(res, e, "get device");

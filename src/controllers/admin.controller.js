@@ -3,6 +3,7 @@ const User = require("../models/User");
 const { getDb, isMongoConnected } = require("../db/mongo");
 const { getMqttClient } = require("../mqtt/client");
 const { publishControl } = require("../services/controlPublisher");
+const { deleteFiles } = require("../services/fileStore");
 const { logAdminAction } = require("../services/auditLogger");
 const { buildControlSet } = require("./devices.controller");
 const { backupFullDatabase } = require("../../scripts/backup_full_db");
@@ -45,6 +46,23 @@ async function deleteFlowsTouching(db, deviceIds) {
     await db.collection("automation_flow_state").deleteMany({ flowId: { $in: ids } });
   }
   return ids.length;
+}
+
+/**
+ * Remove dashboard personalisation for devices (display settings, group membership)
+ * and, with `userId`, everything the user owns (groups, layout, uploaded files).
+ */
+async function removePersonalisation(db, { userId, deviceIds = [] }) {
+  if (deviceIds.length) {
+    await db.collection("device_ui").deleteMany({ _id: { $in: deviceIds } });
+    await db.collection("device_groups").updateMany({ deviceIds: { $in: deviceIds } }, { $pull: { deviceIds: { $in: deviceIds } } });
+  }
+  if (userId) {
+    await db.collection("device_ui").deleteMany({ user_id: userId });
+    await db.collection("device_groups").deleteMany({ user_id: userId });
+    await db.collection("dashboards").deleteOne({ _id: userId });
+    await deleteFiles(db, { user_id: userId });
+  }
 }
 
 // GET /api/admin/stats
@@ -111,6 +129,8 @@ async function deleteUser(req, res) {
       await db.collection("automation_flow_state").deleteMany({ flowId: { $in: userFlows.map((f) => f._id) } });
     }
 
+    await removePersonalisation(db, { userId, deviceIds });
+
     await User.findByIdAndDelete(userId);
     await audit(req, "USER_DELETE", userId, { userEmail: user.email, devicesDeleted: deviceIds });
 
@@ -144,6 +164,7 @@ async function deleteDevice(req, res) {
     await db.collection("device_control").deleteOne({ _id: deviceId });
     await db.collection("device_schedules").deleteMany({ deviceId });
     const flowsDeleted = await deleteFlowsTouching(db, [deviceId]);
+    await removePersonalisation(db, { deviceIds: [deviceId] });
 
     await audit(req, "DEVICE_DELETE", deviceId, { ownerId: device.device?.user_id || null, flowsDeleted });
     return res.json({ ok: true, message: "Device and associated data deleted" });
@@ -497,6 +518,8 @@ async function transferDeviceOwnership(req, res) {
     // The old owner's flows/schedules must not keep driving a device they no longer own
     const flowsDeleted = previousOwnerId !== newOwnerId ? await deleteFlowsTouching(db, [deviceId]) : 0;
     const schedules = previousOwnerId !== newOwnerId ? await db.collection("device_schedules").deleteMany({ deviceId }) : { deletedCount: 0 };
+    // The old owner's names, location and groups for this device go too (privacy)
+    if (previousOwnerId !== newOwnerId) await removePersonalisation(db, { deviceIds: [deviceId] });
 
     await audit(req, "DEVICE_TRANSFER", deviceId, {
       previousOwnerId,

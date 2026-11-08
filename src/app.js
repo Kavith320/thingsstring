@@ -7,6 +7,10 @@ const deviceRoutes = require("./routes/devices.routes");
 const scheduleRoutes = require("./routes/schedules.routes");
 const adminRoutes = require("./routes/admin.routes");
 const automationRoutes = require("./routes/automation.routes");
+const profileRoutes = require("./routes/profile.routes");
+const customizeRoutes = require("./routes/customize.routes");
+const { serveFile } = require("./services/fileStore");
+const { getDb } = require("./db/mongo");
 
 function parseTrustProxy(v) {
   if (v === undefined || v === "") return false;
@@ -33,7 +37,7 @@ function createApp() {
   app.use(
     cors({
       origin: origins.length ? origins : "*",
-      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Content-Type", "Authorization"],
     })
   );
@@ -54,6 +58,13 @@ function createApp() {
   app.use("/api/schedules", scheduleRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/automation", automationRoutes);
+  app.use("/api/me", profileRoutes);
+  app.use("/api/groups", customizeRoutes.groups);
+  app.use("/api/dashboard", customizeRoutes.dashboard);
+  app.use("/api/files", customizeRoutes.files);
+
+  // Uploaded images (avatars, icons): public, unguessable ids, usable in <img src>
+  app.get("/files/:id", (req, res, next) => serveFile(getDb(), req, res).catch(next));
 
   app.use((req, res) => res.status(404).json({ ok: false, error: "Not found" }));
 

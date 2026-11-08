@@ -31,6 +31,20 @@ async function getDeviceOnlineState(db, deviceId, maxAgeSec = offlineThresholdSe
   return { online: ageSec <= maxAgeSec, ageSec };
 }
 
+/** { online, lastSeen } for the API, from a latest-telemetry document (or null). */
+function statusFromTelemetry(doc, maxAgeSec = offlineThresholdSec()) {
+  const t = telemetryTimeMs(doc);
+  if (t === null) return { online: false, lastSeen: null };
+  return { online: (Date.now() - t) / 1000 <= maxAgeSec, lastSeen: new Date(t).toISOString() };
+}
+
+async function getDeviceStatus(db, deviceId) {
+  const last = await db
+    .collection("device_telemetry")
+    .findOne({ deviceId }, { sort: { _id: -1 }, projection: { _id: 1, createdAt: 1 } });
+  return statusFromTelemetry(last);
+}
+
 /** An actuator is in AUTO mode if either the live `auto` flag or the config default says so. */
 function isAutoMode(actuator) {
   if (!actuator || typeof actuator !== "object") return false;
@@ -53,6 +67,8 @@ async function findOwnedDevice(db, deviceId, userId) {
 module.exports = {
   offlineThresholdSec,
   getDeviceOnlineState,
+  statusFromTelemetry,
+  getDeviceStatus,
   isAutoMode,
   deviceOwnerId,
   findOwnedDevice,
