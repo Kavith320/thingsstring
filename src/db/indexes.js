@@ -85,6 +85,10 @@ async function ensureIndexes(db) {
     db.collection("device_access").createIndex({ userId: 1 }),
     db.collection("device_invites").createIndex({ tokenHash: 1 }, { unique: true }),
     db.collection("device_invites").createIndex({ deviceId: 1, status: 1 }),
+    // At most one pending invitation per device + email (stops duplicate sends from double clicks)
+    db
+      .collection("device_invites")
+      .createIndex({ deviceId: 1, email: 1 }, { unique: true, partialFilterExpression: { status: "pending" }, name: "one_pending_invite" }),
     db.collection("device_invites").createIndex({ email: 1, status: 1 }),
     db.collection("device_invites").createIndex({ invitedBy: 1, createdAt: -1 }),
     ensureTtlIndex(db, "device_invites", "expiresAt", 30 * 86400),

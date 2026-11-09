@@ -226,6 +226,8 @@ test("members can leave; a re-invite replaces the old link", async () => {
   const bob = await verified();
   await createDevice(db, "d1", owner.id);
   const first = await invite(owner, "d1", bob.email, "viewer");
+  // resending only sends a new email after the 2-minute cooldown
+  await db.collection("device_invites").updateMany({}, { $set: { createdAt: new Date(Date.now() - 3 * 60e3) } });
   const second = await invite(owner, "d1", bob.email, "operator");
   assert.equal((await call(bob, "POST", "/api/invites/accept", { token: first.token })).status, 400, "old link revoked");
   assert.equal((await call(bob, "POST", "/api/invites/accept", { token: second.token })).status, 200);

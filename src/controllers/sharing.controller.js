@@ -14,6 +14,9 @@ const { saveAlertSettings, serializeAlertSettings, alertId, MIN_AFTER_MIN, MAX_A
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_MEMBERS = 25; // members + pending invites per device
 const MAX_INVITES_PER_DAY = 20; // per inviter: invitation emails count against the free-tier quota
+const RESEND_COOLDOWN_MS = 2 * 60e3; // a repeat within this window sends no new email
+
+const inviteOut = (i) => ({ id: i._id, email: i.email, role: i.role, status: i.status, expiresAt: i.expiresAt });
 
 const bad = (res, error, status = 400, extra = {}) => res.status(status).json({ ok: false, error, ...extra });
 const denied = (res, a) => bad(res, a.error, a.status, a.code ? { code: a.code } : {});
@@ -91,6 +94,21 @@ async function createInvite(req, res) {
 
     const invites = db.collection("device_invites");
     const now = new Date();
+
+    // Duplicate protection (double clicks, a held Enter key, client retries on a slow link):
+    // the same person invited again within 2 minutes gets no new email; a changed role
+    // just updates the invitation that was already sent.
+    const existing = await invites.findOne({ deviceId, email, status: "pending" });
+    if (existing && existing.expiresAt <= now) {
+      await invites.updateOne({ _id: existing._id, status: "pending" }, { $set: { status: "expired" } });
+    } else if (existing && now - existing.createdAt < RESEND_COOLDOWN_MS) {
+      if (existing.role !== role) {
+        await invites.updateOne({ _id: existing._id, status: "pending" }, { $set: { role } });
+        existing.role = role;
+      }
+      return res.json({ ok: true, alreadySent: true, invite: inviteOut(existing), message: "The invitation was just sent. You can send it again in 2 minutes." });
+    }
+
     const [members, pending, sentToday] = await Promise.all([
       db.collection("device_access").countDocuments({ deviceId }),
       invites.countDocuments({ deviceId, status: "pending", expiresAt: { $gt: now }, email: { $ne: email } }),
@@ -102,11 +120,20 @@ async function createInvite(req, res) {
     if (b.remaining <= 0) return bad(res, "Email sending is paused for today (daily limit reached). Try again tomorrow.", 503);
 
     // A new invite to the same address replaces the old one (acts as "resend")
-    await invites.updateMany({ deviceId, email, status: "pending" }, { $set: { status: "revoked", revokedReason: "replaced" } });
+    if (existing) await invites.updateOne({ _id: existing._id, status: "pending" }, { $set: { status: "revoked", revokedReason: "replaced" } });
 
     const { raw, hash } = newInviteToken();
     const doc = { deviceId, email, role, invitedBy: req.user.id, tokenHash: hash, status: "pending", createdAt: now, expiresAt: new Date(now.getTime() + INVITE_TTL_MS) };
-    const { insertedId } = await invites.insertOne(doc);
+    let insertedId;
+    try {
+      ({ insertedId } = await invites.insertOne(doc));
+    } catch (e) {
+      // A unique index allows one pending invite per device + email: a request that raced
+      // this one already created it (and sent the email)
+      if (e?.code !== 11000) throw e;
+      const winner = await invites.findOne({ deviceId, email, status: "pending" });
+      return res.json({ ok: true, alreadySent: true, invite: winner ? inviteOut(winner) : { email, role, status: "pending" } });
+    }
 
     const [inviter, ui] = await Promise.all([
       db.collection("users").findOne({ _id: new ObjectId(req.user.id) }, { projection: { name: 1 } }),
