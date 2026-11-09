@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const { ObjectId } = require("mongoose").mongo;
 const { getDeviceAccess, canManageRole } = require("./deviceAccess");
 const { logActivity } = require("./activity");
+const { deviceDisplayName } = require("../email/notify");
 
 const INVITE_TTL_MS = 7 * 24 * 3600e3;
 const hashToken = (raw) => crypto.createHash("sha256").update(raw).digest("hex");
@@ -67,18 +68,18 @@ async function acceptInvite(db, invite, user) {
 
 /** Public summary of an invite for the invite page (before the user signs in). */
 async function describeInvite(db, invite) {
-  const [inviter, ui, account] = await Promise.all([
+  const [inviter, { name: deviceName }, account] = await Promise.all([
     ObjectId.isValid(invite.invitedBy)
       ? db.collection("users").findOne({ _id: new ObjectId(invite.invitedBy) }, { projection: { name: 1 } })
       : null,
-    db.collection("device_ui").findOne({ _id: invite.deviceId }, { projection: { displayName: 1 } }),
+    deviceDisplayName(db, invite.deviceId),
     db.collection("users").findOne({ email: invite.email }, { projection: { _id: 1 } }),
   ]);
   return {
     email: invite.email,
     role: invite.role,
     deviceId: invite.deviceId,
-    deviceName: ui?.displayName || invite.deviceId,
+    deviceName,
     invitedBy: inviter?.name || "A ThingsString user",
     expiresAt: invite.expiresAt,
     accountExists: !!account, // the page shows "Sign in" or "Create account"
