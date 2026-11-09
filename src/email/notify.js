@@ -131,9 +131,14 @@ async function notifyUser(db, { userId, category, deviceId = null, template, dat
  * How the device looks in the app (same for everyone it's shared with):
  * { name, device: { deviceId, name, icon, color } } for emails.
  */
+/** Same order as the app: the name set in Customize, then the device's own name, then its id. */
 async function deviceDisplayName(db, deviceId) {
-  const ui = await db.collection("device_ui").findOne({ _id: deviceId }, { projection: { displayName: 1, icon: 1, color: 1 } });
-  const name = ui?.displayName || deviceId;
+  const [ui, cfg] = await Promise.all([
+    db.collection("device_ui").findOne({ _id: deviceId }, { projection: { displayName: 1, icon: 1, color: 1 } }),
+    db.collection("device_config").findOne({ _id: deviceId }, { projection: { "device.name": 1 } }),
+  ]);
+  const own = typeof cfg?.device?.name === "string" ? cfg.device.name.trim() : "";
+  const name = ui?.displayName || own || deviceId;
   return { name, device: { deviceId, name, icon: ui?.icon || null, color: ui?.color || null } };
 }
 

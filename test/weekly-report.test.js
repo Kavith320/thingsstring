@@ -182,3 +182,22 @@ test("device emails show the configured name, icon and id (uploaded icons are em
   assert.deepEqual(Buffer.from(att.content, "base64"), png);
   assert.match(mail.text, /Device: Greenhouse Pump \(ID: ESP32-A1\)/);
 });
+
+test("device emails fall back to the device's own name when none was set in Customize", async () => {
+  const owner = await verified();
+  await createDevice(db, "e00e6c1c4278", owner.id);
+  await db.collection("device_config").updateOne({ _id: "e00e6c1c4278" }, { $set: { "device.name": "Smart Solenoid Valve" } });
+  await call(owner, "PUT", "/api/devices/e00e6c1c4278/alerts", { offline: { enabled: true, afterMin: 5 } });
+
+  const { checkDevices } = require("../src/services/deviceWatchdog");
+  await db.collection("device_telemetry").updateMany({ deviceId: "e00e6c1c4278" }, { $set: { createdAt: new Date(Date.now() - 10 * 60e3) } });
+  await checkDevices(db);
+  const [mail] = await deliver();
+  assert.match(mail.subject, /Smart Solenoid Valve is offline/);
+  assert.match(mail.html, /ID: e00e6c1c4278/);
+
+  // A name set in Customize still wins
+  const { deviceDisplayName } = require("../src/email/notify");
+  await call(owner, "PATCH", "/api/devices/e00e6c1c4278/ui", { displayName: "Garden Valve" });
+  assert.equal((await deviceDisplayName(db, "e00e6c1c4278")).name, "Garden Valve");
+});
