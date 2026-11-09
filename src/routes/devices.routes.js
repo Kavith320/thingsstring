@@ -30,7 +30,14 @@ router.get("/:deviceId/ui", requireAuth, getDeviceUi);
 router.get("/:deviceId/members", requireAuth, share.listMembers);
 router.patch("/:deviceId/members/:userId", requireAuth, share.changeMemberRole);
 router.delete("/:deviceId/members/:userId", requireAuth, share.removeMember);
-router.post("/:deviceId/invites", requireAuth, requireVerifiedEmail, share.createInvite);
+// Burst guard: a held Enter key or a retry loop can fire many requests per second
+const inviteBurst = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  key: (req) => `invite:user:${req.user.id}`,
+  message: "Too many invitations at once. Wait a minute and try again.",
+});
+router.post("/:deviceId/invites", requireAuth, inviteBurst, requireVerifiedEmail, share.createInvite);
 router.delete("/:deviceId/invites/:inviteId", requireAuth, share.cancelInvite);
 router.get("/:deviceId/alerts", requireAuth, share.getAlerts);
 router.put("/:deviceId/alerts", requireAuth, share.updateAlerts);
