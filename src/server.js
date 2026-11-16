@@ -6,6 +6,7 @@ const { ensureIndexes } = require("./db/indexes");
 const { startMqtt, stopMqtt } = require("./mqtt/client");
 const { publishAllControlsOnce, watchControlChanges, stopWatching } = require("./services/controlPublisher");
 const { checkJwtSecretStrength } = require("./utils/jwt");
+const { closeAllStreams } = require("./services/wallHub");
 
 process.on("unhandledRejection", (err) => console.error("❌ Unhandled promise rejection:", err));
 
@@ -37,6 +38,7 @@ async function main() {
     console.log(`🛑 ${signal} received, shutting down...`);
     const force = setTimeout(() => process.exit(1), 10000);
     force.unref();
+    closeAllStreams(); // open wall screens would otherwise keep the server from closing
     server.close();
     await stopWatching();
     await stopMqtt();

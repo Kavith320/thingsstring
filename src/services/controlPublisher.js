@@ -11,6 +11,7 @@
 
 const { getDb } = require("../db/mongo");
 const { getMqttClient } = require("../mqtt/client");
+const { emitSafe } = require("./deviceBus");
 
 // Same payload for the same device within this window is sent only once
 // (the API publishes directly AND the change stream sees the same write).
@@ -123,7 +124,10 @@ async function watchControlChanges() {
     stream.on("change", (change) => {
       resumeToken = change._id;
       const doc = change.fullDocument;
-      if (doc && doc._id) publishControl(doc._id, doc);
+      if (doc && doc._id) {
+        publishControl(doc._id, doc);
+        emitSafe("control", doc._id, doc); // live wall displays
+      }
     });
 
     stream.on("error", (err) => {

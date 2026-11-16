@@ -3,6 +3,7 @@ const mqtt = require("mqtt");
 const { getDb } = require("../db/mongo");
 const { isPlainObject } = require("../utils/http");
 const { logActivity } = require("../services/activity");
+const { emitSafe } = require("../services/deviceBus");
 
 let mqttClient = null;
 
@@ -162,7 +163,9 @@ async function handleDeviceMessage(db, topic, payloadBuf) {
   // TELEMETRY: server-controlled fields are applied LAST so a payload can't
   // write into another device's history or break the TTL expiry.
   const { _id, ...fields } = payload;
-  await db.collection("device_telemetry").insertOne({ ...fields, deviceId, createdAt: new Date() });
+  const doc = { ...fields, deviceId, createdAt: new Date() };
+  await db.collection("device_telemetry").insertOne(doc);
+  emitSafe("telemetry", deviceId, doc); // live wall displays
 }
 
 /**

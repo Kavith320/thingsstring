@@ -10,6 +10,7 @@ const automationRoutes = require("./routes/automation.routes");
 const profileRoutes = require("./routes/profile.routes");
 const customizeRoutes = require("./routes/customize.routes");
 const inviteRoutes = require("./routes/invites.routes");
+const wallRoutes = require("./routes/wall.routes");
 const { serveFile } = require("./services/fileStore");
 const { getDb } = require("./db/mongo");
 
@@ -64,6 +65,8 @@ function createApp() {
   app.use("/api/dashboard", customizeRoutes.dashboard);
   app.use("/api/files", customizeRoutes.files);
   app.use("/api/invites", inviteRoutes);
+  app.use("/api/wall", wallRoutes.owner);
+  app.use("/api/public/wall", wallRoutes.public);
 
   // Uploaded images (avatars, icons): public, unguessable ids, usable in <img src>
   app.get("/files/:id", (req, res, next) => serveFile(getDb(), req, res).catch(next));
