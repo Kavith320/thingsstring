@@ -77,6 +77,7 @@ async function removePersonalisation(db, { userId, deviceIds = [] }) {
     await db.collection("device_invites").updateMany({ invitedBy: userId, status: "pending" }, { $set: { status: "revoked", revokedReason: "inviter deleted" } });
     await db.collection("device_groups").deleteMany({ user_id: userId });
     await db.collection("dashboards").deleteOne({ _id: userId });
+    await db.collection("wall_displays").deleteOne({ userId }); // its public link dies with it
     await deleteFiles(db, { user_id: userId });
   }
 }

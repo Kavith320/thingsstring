@@ -98,6 +98,12 @@ async function ensureIndexes(db) {
     ensureTtlIndex(db, "device_activity", "ts", ACTIVITY_TTL_DAYS * 86400),
     db.collection("email_outbox").createIndex({ status: 1, sentAt: -1 }),
 
+    // Wall displays: one per user; public links are looked up by token hash
+    db.collection("wall_displays").createIndex({ userId: 1 }, { unique: true }),
+    db
+      .collection("wall_displays")
+      .createIndex({ "link.tokenHash": 1 }, { unique: true, partialFilterExpression: { "link.tokenHash": { $exists: true } }, name: "wall_link_token" }),
+
     // Admin audit trail (kept forever)
     db.collection("admin_audit_logs").createIndex({ timestamp: -1 }),
   ];
