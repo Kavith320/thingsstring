@@ -2,6 +2,7 @@
 const mqtt = require("mqtt");
 const { getDb } = require("../db/mongo");
 const { isPlainObject } = require("../utils/http");
+const { logActivity } = require("../services/activity");
 
 let mqttClient = null;
 
@@ -10,6 +11,56 @@ const MAX_PAYLOAD_BYTES = 64 * 1024;
 // Fields on device_config that belong to the server, not to the device.
 // A device re-publishing its config must never be able to change these.
 const SERVER_OWNED_CONFIG_FIELDS = ["isDisabled", "disabledReason", "disabledAt", "ownerAssignedAt"];
+
+// Device events (ts/<deviceId>/event) go into the device's activity history.
+// A device may send its backlog after an outage, so the time it gives is kept when it is
+// plausible; a flood (a fault or a loop on the device) is cut off per device and minute.
+const EVENT_TYPES = new Set(["SYSTEM", "SD", "SENSOR", "RELAY", "WIFI", "CLOUD", "USER", "SETTING"]);
+const EVENT_MSG_MAX = 200;
+const EVENT_PER_MINUTE = parseInt(process.env.DEVICE_EVENTS_PER_MINUTE || "60", 10) || 60;
+const EVENT_MAX_AGE_MS = 7 * 86400e3;
+const EVENT_MAX_AHEAD_MS = 120e3;
+const eventWindows = new Map(); // deviceId -> { start, count, dropped }
+
+function eventTime(t, now) {
+  if (typeof t === "number" && t > 0) {
+    const ms = t * 1000;
+    if (ms >= now - EVENT_MAX_AGE_MS && ms <= now + EVENT_MAX_AHEAD_MS) return new Date(ms);
+  }
+  return new Date(now); // no clock on the device yet, or a wrong one
+}
+
+/** True if this device may store another event this minute. */
+function eventAllowed(deviceId, now) {
+  let w = eventWindows.get(deviceId);
+  if (!w || now - w.start >= 60e3) {
+    if (w?.dropped) console.warn(`⚠️ [MQTT] ${deviceId} sent too many events: ${w.dropped} dropped`);
+    w = { start: now, count: 0, dropped: 0 };
+    eventWindows.set(deviceId, w);
+  }
+  if (w.count >= EVENT_PER_MINUTE) {
+    w.dropped++;
+    return false;
+  }
+  w.count++;
+  return true;
+}
+
+async function handleDeviceEvent(db, deviceId, payload, now = Date.now()) {
+  const msg = typeof payload.msg === "string" ? payload.msg.trim().slice(0, EVENT_MSG_MAX) : "";
+  if (!msg) return;
+  // Only devices the platform knows: a random id must not fill the database
+  const known = await db.collection("device_config").findOne({ _id: deviceId }, { projection: { _id: 1 } });
+  if (!known || !eventAllowed(deviceId, now)) return;
+  const type = EVENT_TYPES.has(payload.type) ? payload.type : "OTHER";
+  await logActivity(db, {
+    deviceId,
+    actor: { type: "device" },
+    action: `device.${type.toLowerCase()}`,
+    details: { type, msg },
+    ts: eventTime(payload.t, now),
+  });
+}
 
 /**
  * Create/extend the device_control document from the actuators in a config.
@@ -67,7 +118,7 @@ function buildConfigDoc(deviceId, payload, existing) {
 
 /**
  * Handle one incoming MQTT message. Exported for tests.
- * Topics: ts/<deviceId>/config and ts/<deviceId>/telemetry
+ * Topics: ts/<deviceId>/config, ts/<deviceId>/telemetry and ts/<deviceId>/event
  */
 async function handleDeviceMessage(db, topic, payloadBuf) {
   const parts = topic.split("/");
@@ -75,7 +126,7 @@ async function handleDeviceMessage(db, topic, payloadBuf) {
 
   const [root, deviceId, type] = parts;
   if (root !== "ts" || !deviceId) return;
-  if (type !== "config" && type !== "telemetry") return;
+  if (type !== "config" && type !== "telemetry" && type !== "event") return;
 
   if (payloadBuf.length > MAX_PAYLOAD_BYTES) {
     console.error(`❌ [MQTT] Payload too large from ${deviceId} on ${topic} (${payloadBuf.length} bytes) — dropped`);
@@ -91,6 +142,11 @@ async function handleDeviceMessage(db, topic, payloadBuf) {
   }
   if (!isPlainObject(payload)) {
     console.error(`❌ [MQTT] Payload from ${deviceId} on ${topic} is not a JSON object — dropped`);
+    return;
+  }
+
+  if (type === "event") {
+    await handleDeviceEvent(db, deviceId, payload);
     return;
   }
 
@@ -187,4 +243,4 @@ async function stopMqtt() {
   mqttClient = null;
 }
 
-module.exports = { startMqtt, getMqttClient, stopMqtt, handleDeviceMessage, buildConfigDoc };
+module.exports = { startMqtt, getMqttClient, stopMqtt, handleDeviceMessage, handleDeviceEvent, buildConfigDoc };

@@ -60,6 +60,27 @@ function publishControl(deviceId, controlDoc, { force = false } = {}) {
   return true;
 }
 
+// One-off commands a device understands on ts/<deviceId>/cmd (not retained: a command must
+// not run again when the device reconnects). Whitelisted: the API never forwards free text.
+const DEVICE_COMMANDS = new Set(["update", "check_update"]);
+
+/** Send a one-off command. Returns false when MQTT is down. */
+function publishCommand(deviceId, action) {
+  if (!DEVICE_COMMANDS.has(action)) throw new Error(`Unknown device command '${action}'`);
+  let client;
+  try {
+    client = getMqttClient();
+  } catch {
+    return false;
+  }
+  if (!client.connected) return false;
+  client.publish(`ts/${deviceId}/cmd`, JSON.stringify({ action }), { qos: 1, retain: false }, (err) => {
+    if (err) console.error(`❌ MQTT [${deviceId}] command publish error:`, err.message);
+    else console.log(`📤 [${deviceId}] Command: ${action}`);
+  });
+  return true;
+}
+
 async function publishAllControlsOnce() {
   const docs = await getDb().collection("device_control").find({}).toArray();
   let sent = 0;
@@ -129,6 +150,8 @@ async function stopWatching() {
 }
 
 module.exports = {
+  DEVICE_COMMANDS,
+  publishCommand,
   publishControl,
   publishAllControlsOnce,
   watchControlChanges,

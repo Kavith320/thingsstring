@@ -247,6 +247,13 @@ Updates the desired state of actuators on a device.
 - The change is saved and published as a retained message to `ts/:deviceId/control` via MQTT.
 - Returns `403` if an admin has locked the device.
 
+### Send a Command to the Device
+`POST /api/devices/:deviceId/command` (manager or owner)
+
+**Body:** `{ "action": "update" }` or `{ "action": "check_update" }`
+
+Published once (QoS 1, **not** retained) to `ts/:deviceId/cmd`. `update` makes the device look for its newest firmware release and install it; `check_update` only looks, and the device reports the result in its config (`board.update`). Only these actions are accepted (`400` otherwise). `503` while MQTT is down, `403` for a locked device. Logged in the activity history as `device.command`.
+
 ### Sharing, roles, per-device alerts, activity history
 Devices can be shared by email invitation with the roles **viewer**, **operator** and **manager**. New users can sign up straight from the invitation. Device responses include `role` and `sharedBy`. See **[SHARING_FRONTEND_GUIDE.md](SHARING_FRONTEND_GUIDE.md)**.
 
@@ -394,6 +401,21 @@ Devices should subscribe to this topic to receive state changes from the platfor
 }
 ```
 The payload is the device's whole control document: each actuator's definition from its config plus the fields set through the API.
+
+### Device Events
+**Topic:** `ts/<deviceId>/event` (Publish)
+What happened on the device, stored in its activity history (`GET /api/devices/:deviceId/activity`, filter `action=device`) as action `device.<type>` with actor `{ "type": "device" }`.
+
+```json
+{ "t": 1794850726, "type": "WIFI", "msg": "Wi-Fi back after 312 s, 4 failed tries" }
+```
+- `type`: `SYSTEM`, `SD`, `SENSOR`, `RELAY`, `WIFI`, `CLOUD`, `USER`, `SETTING` (anything else is stored as `OTHER`). `msg`: up to 200 characters.
+- `t`: unix seconds when it happened, so events queued during an outage keep their time. Missing, `0`, older than 7 days or in the future: the server time is used.
+- Only devices with a config are accepted, at most `DEVICE_EVENTS_PER_MINUTE` (default 60) per device and minute.
+
+### Device Commands
+**Topic:** `ts/<deviceId>/cmd` (Subscribe)
+One-off commands from `POST /api/devices/:deviceId/command`: `{ "action": "update" }`.
 
 ---
 
