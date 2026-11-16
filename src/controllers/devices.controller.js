@@ -1,7 +1,7 @@
 // src/controllers/devices.controller.js
 const { getDb } = require("../db/mongo");
 const { ObjectId } = require("mongoose").mongo;
-const { publishControl } = require("../services/controlPublisher");
+const { publishControl, publishCommand, DEVICE_COMMANDS } = require("../services/controlPublisher");
 const { statusFromTelemetry } = require("../services/deviceState");
 const { requireDeviceRole, accessibleDevices, ownerOf } = require("../services/deviceAccess");
 const { logActivity, actorFromReq } = require("../services/activity");
@@ -313,6 +313,31 @@ function buildControlSet(config, updates) {
   return { $set };
 }
 
+// POST /api/devices/:deviceId/command  { "action": "update" | "check_update" }
+// One-off command for the device (firmware update). Managers and owners only.
+async function sendDeviceCommand(req, res) {
+  try {
+    const db = getDb();
+    const { deviceId } = req.params;
+    const access = await requireDeviceRole(db, deviceId, req.user.id, "manager");
+    if (access.error) return denied(res, access);
+    if (access.config.isDisabled) {
+      return res.status(403).json({ ok: false, error: `Device is locked out by admin. Reason: ${access.config.disabledReason || "Admin Lockout"}` });
+    }
+    const action = (req.body || {}).action;
+    if (typeof action !== "string" || !DEVICE_COMMANDS.has(action)) {
+      return res.status(400).json({ ok: false, error: `action must be one of: ${[...DEVICE_COMMANDS].join(", ")}` });
+    }
+    if (!publishCommand(deviceId, action)) {
+      return res.status(503).json({ ok: false, error: "Can't reach devices right now (MQTT is down). Try again in a minute." });
+    }
+    await logActivity(db, { deviceId, actor: actorFromReq(req), action: "device.command", details: { action } });
+    return res.json({ ok: true, deviceId, action });
+  } catch (e) {
+    return sendServerError(res, e, "device command");
+  }
+}
+
 // POST /api/devices/:deviceId/control
 async function updateDeviceControl(req, res) {
   try {
@@ -355,5 +380,6 @@ module.exports = {
   exportDeviceTelemetryCsv,
   updateDeviceControl,
   buildControlSet,
+  sendDeviceCommand,
   denied,
 };

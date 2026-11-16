@@ -7,7 +7,8 @@ const {
   getDeviceById,
   getDeviceTelemetry,
   exportDeviceTelemetryCsv,
-  updateDeviceControl
+  updateDeviceControl,
+  sendDeviceCommand,
 } = require("../controllers/devices.controller");
 const { getDeviceUi, updateDeviceUi, getDeviceMap } = require("../controllers/customize.controller");
 
@@ -24,6 +25,7 @@ const exportLimit = rateLimit({
 });
 router.get("/:deviceId/telemetry/export", requireAuth, exportLimit, exportDeviceTelemetryCsv);
 router.post("/:deviceId/control", requireAuth, updateDeviceControl);
+router.post("/:deviceId/command", requireAuth, sendDeviceCommand);
 router.get("/:deviceId/ui", requireAuth, getDeviceUi);
 
 // Sharing (members + invitations), personal alert settings, activity history
