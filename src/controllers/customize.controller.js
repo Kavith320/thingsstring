@@ -318,6 +318,45 @@ async function uploadIcon(req, res) {
   }
 }
 
+const MAX_IMAGES = 50;
+const imageOf = (f) => ({ id: f._id, ref: `file:${f._id}`, url: `/files/${f._id}`, mime: f.mime, size: f.size, createdAt: f.createdAt });
+
+// GET /api/files/images
+async function listImages(req, res) {
+  try {
+    const files = await getDb().collection("files").find({ user_id: req.user.id, kind: "image" }).sort({ createdAt: -1 }).toArray();
+    return res.json({ ok: true, count: files.length, images: files.map(imageOf) });
+  } catch (e) {
+    return handle(res, e, "list images");
+  }
+}
+
+// POST /api/files/images  (raw image body, max 2 MB; the app shrinks photos before sending)
+async function uploadImage(req, res) {
+  try {
+    const db = getDb();
+    const count = await db.collection("files").countDocuments({ user_id: req.user.id, kind: "image" });
+    if (count >= MAX_IMAGES) fail(`You can upload at most ${MAX_IMAGES} pictures; delete one first`);
+    const file = await saveImage(db, req.body, { userId: req.user.id, kind: "image" });
+    return res.status(201).json({ ok: true, image: imageOf(file) });
+  } catch (e) {
+    return handle(res, e, "upload image");
+  }
+}
+
+// DELETE /api/files/images/:fileId  (wall tiles still using it show an empty picture)
+async function deleteImage(req, res) {
+  try {
+    const { fileId } = req.params;
+    if (!/^[a-f0-9]{32}$/.test(fileId)) return notFound(res, "Picture");
+    const n = await deleteFiles(getDb(), { _id: fileId, user_id: req.user.id, kind: "image" });
+    if (!n) return notFound(res, "Picture");
+    return res.json({ ok: true });
+  } catch (e) {
+    return handle(res, e, "delete image");
+  }
+}
+
 // DELETE /api/files/icons/:fileId  (cards/groups still using it fall back to no icon)
 async function deleteIcon(req, res) {
   try {
@@ -343,6 +382,9 @@ module.exports = {
   getDashboard,
   saveDashboard,
   listIcons,
+  listImages,
+  uploadImage,
+  deleteImage,
   uploadIcon,
   deleteIcon,
 };

@@ -92,8 +92,9 @@ async function getWall(req, res) {
 async function saveWall(req, res) {
   try {
     const db = getDb();
-    const { title, display, pages, deviceIds, iconRefs } = w.validateWall(req.body);
+    const { title, display, pages, deviceIds, iconRefs, imageRefs } = w.validateWall(req.body);
     await assertOwnFiles(db, req.user.id, iconRefs, "icon");
+    await assertOwnFiles(db, req.user.id, imageRefs, "image");
 
     const allowed = await w.publishableDevices(db, req.user.id, deviceIds);
     const refused = deviceIds.filter((id) => !allowed.has(id));

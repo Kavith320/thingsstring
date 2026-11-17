@@ -28,5 +28,9 @@ const files = express.Router();
 files.get("/icons", requireAuth, c.listIcons);
 files.post("/icons", requireAuth, uploadLimit, rawImage, c.uploadIcon);
 files.delete("/icons/:fileId", requireAuth, c.deleteIcon);
+// Pictures for wall image tiles (photos of the farm, factory, a map…)
+files.get("/images", requireAuth, c.listImages);
+files.post("/images", requireAuth, uploadLimit, rawImage, c.uploadImage);
+files.delete("/images/:fileId", requireAuth, c.deleteImage);
 
 module.exports = { groups, dashboard, files };

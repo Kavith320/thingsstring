@@ -30,10 +30,18 @@ const MAX_DEVICES = 50;
 const HISTORY_MS = 60 * 60 * 1000;
 const HISTORY_POINTS = 60;
 
-const TILE_TYPES = ["sensor", "actuator", "status", "clock", "text"];
+const TILE_TYPES = ["sensor", "actuator", "status", "clock", "text", "graph", "image"];
 const DEVICE_TILES = new Set(["sensor", "actuator", "status"]);
-const TILE_SIZES = ["s", "m", "l", "t"]; // 1x1, 2x1, 2x2, 1x2
+const TILE_SIZES = ["s", "m", "l", "t"]; // legacy sizes, used only to place tiles that have no position yet
+const MAX_GRID = 24; // canvas columns / rows
 const SENSOR_STYLES = ["number", "gauge", "chart"];
+const ICON_SIZES = ["sm", "md", "lg"];
+const GRAPH_KINDS = ["line", "area", "bar"];
+const GRAPH_RANGES_H = [1, 6, 24, 72, 168]; // telemetry is kept 7 days
+const MAX_SERIES = 4;
+const MAX_GROUPS_PER_PAGE = 16;
+const GRAPH_POINTS = 120;
+const FILE_REF_RE = /^file:([a-f0-9]{32})$/;
 const ID_RE = /^[A-Za-z0-9_-]{1,16}$/;
 const SENSOR_KEY_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -171,12 +179,23 @@ function validateDisplay(d = {}) {
   if (!isPlainObject(sound)) fail("'display.sound' must be an object");
   if (!isPlainObject(voice)) fail("'display.voice' must be an object");
   if (!isPlainObject(quiet)) fail("'display.quietHours' must be an object");
+  const canvas = d.canvas === undefined || d.canvas === null ? {} : d.canvas;
+  if (!isPlainObject(canvas)) fail("'display.canvas' must be an object");
   const rotateSec = optInt(d.rotateSec, "display.rotateSec", { min: 0, max: 3600, fallback: 0 });
   if (rotateSec > 0 && rotateSec < 5) fail("'display.rotateSec' must be 0 (off) or at least 5");
   return {
     theme: pick(d.theme, "display.theme", ["auto", "light", "dark"], "dark"),
     accent: optColor(d.accent ?? null, "display.accent"),
     columns: optInt(d.columns, "display.columns", { min: 2, max: 8, fallback: 4 }),
+    // The screen the wall is designed for: its size sets the shape of the canvas, which is
+    // split into cols x rows cells that tiles snap to. Other screens scale it to fit.
+    canvas: {
+      width: optInt(canvas.width, "display.canvas.width", { min: 320, max: 7680, fallback: 1920 }),
+      height: optInt(canvas.height, "display.canvas.height", { min: 320, max: 7680, fallback: 1080 }),
+      cols: optInt(canvas.cols, "display.canvas.cols", { min: 2, max: MAX_GRID, fallback: 12 }),
+      rows: optInt(canvas.rows, "display.canvas.rows", { min: 2, max: MAX_GRID, fallback: 6 }),
+    },
+    notifySec: optInt(d.notifySec, "display.notifySec", { min: 3, max: 120, fallback: 8 }),
     textScale: optNumber(d.textScale, "display.textScale", { min: 0.75, max: 2 }) ?? 1,
     rotateSec,
     showClock: optBool(d.showClock, "display.showClock", true),
@@ -184,13 +203,13 @@ function validateDisplay(d = {}) {
     highlightSec: optInt(d.highlightSec, "display.highlightSec", { min: 1, max: 60, fallback: 6 }),
     burnInShift: optBool(d.burnInShift, "display.burnInShift", true),
     sound: {
-      enabled: optBool(sound.enabled, "display.sound.enabled", false),
+      enabled: optBool(sound.enabled, "display.sound.enabled", true),
       on: pick(sound.on, "display.sound.on", ["all", "alerts"], "all"),
       tone: pick(sound.tone, "display.sound.tone", ["chime", "beep", "soft"], "chime"),
       volume: optNumber(sound.volume, "display.sound.volume", { min: 0, max: 1 }) ?? 0.6,
     },
     voice: {
-      enabled: optBool(voice.enabled, "display.voice.enabled", false),
+      enabled: optBool(voice.enabled, "display.voice.enabled", true),
       on: pick(voice.on, "display.voice.on", ["all", "alerts"], "all"),
       engine: pick(voice.engine, "display.voice.engine", ["natural", "browser"], "natural"),
       naturalVoice:
@@ -210,7 +229,32 @@ function validateDisplay(d = {}) {
   };
 }
 
-function validateTile(t, field, iconRefs) {
+function cellFields(t, field, out, required) {
+  if (t.x === undefined || t.x === null) {
+    if (required) fail(`'${field}' needs x, y, w and h`);
+    return;
+  }
+  out.x = optInt(t.x, `${field}.x`, { min: 0, max: MAX_GRID - 1 });
+  out.y = optInt(t.y, `${field}.y`, { min: 0, max: MAX_GRID - 1 });
+  out.w = optInt(t.w, `${field}.w`, { min: 1, max: MAX_GRID });
+  out.h = optInt(t.h, `${field}.h`, { min: 1, max: MAX_GRID });
+  if ([out.y, out.w, out.h].includes(undefined)) fail(`'${field}' needs x, y, w and h together`);
+  if (out.x + out.w > MAX_GRID || out.y + out.h > MAX_GRID) fail(`'${field}' goes past the edge of the canvas`);
+}
+
+/** A named frame around tiles on a page (tiles inside its area belong to it). */
+function validateGroup(g, field, iconRefs) {
+  if (!isPlainObject(g)) fail(`'${field}' must be an object`);
+  const id = optString(g.id ?? null, `${field}.id`, { pattern: ID_RE, patternMsg: `'${field}.id' must be 1-16 letters, digits, - or _` });
+  if (!id) fail(`'${field}.id' is required`);
+  const icon = parseIconRef(g.icon ?? null, `${field}.icon`);
+  if (icon.fileId) iconRefs.push({ fileId: icon.fileId, field: `${field}.icon` });
+  const out = { id, label: optString(g.label ?? null, `${field}.label`, { max: 40 }), icon: icon.value, color: optColor(g.color ?? null, `${field}.color`) };
+  cellFields(g, field, out, true);
+  return out;
+}
+
+function validateTile(t, field, iconRefs, imageRefs) {
   if (!isPlainObject(t)) fail(`'${field}' must be an object`);
   const id = optString(t.id ?? null, `${field}.id`, { pattern: ID_RE, patternMsg: `'${field}.id' must be 1-16 letters, digits, - or _` });
   if (!id) fail(`'${field}.id' is required`);
@@ -225,9 +269,13 @@ function validateTile(t, field, iconRefs) {
     label: optString(t.label ?? null, `${field}.label`, { max: 60 }),
     icon: icon.value,
     color: optColor(t.color ?? null, `${field}.color`),
+    bg: optColor(t.bg ?? null, `${field}.bg`),
+    iconSize: pick(t.iconSize, `${field}.iconSize`, ICON_SIZES, "sm"),
     size: pick(t.size, `${field}.size`, TILE_SIZES, "s"),
     announce: optBool(t.announce, `${field}.announce`, true),
   };
+  // Position on the canvas grid, in cells. Tiles without one are placed by the screen.
+  cellFields(t, field, tile, false);
 
   if (DEVICE_TILES.has(type)) {
     const deviceId = optString(t.deviceId ?? null, `${field}.deviceId`, { max: 100 });
@@ -256,11 +304,38 @@ function validateTile(t, field, iconRefs) {
   if (type === "text") {
     tile.text = optString(t.text ?? null, `${field}.text`, { max: 300 });
   }
+  if (type === "graph") {
+    // One to four readings, from any devices, drawn over the last `rangeH` hours
+    if (!Array.isArray(t.series) || t.series.length < 1 || t.series.length > MAX_SERIES) fail(`'${field}.series' must be a list of 1 to ${MAX_SERIES} readings`);
+    tile.series = t.series.map((x, i) => {
+      const f = `${field}.series[${i}]`;
+      if (!isPlainObject(x)) fail(`'${f}' must be an object`);
+      const deviceId = optString(x.deviceId ?? null, `${f}.deviceId`, { max: 100 });
+      if (!deviceId) fail(`'${f}.deviceId' is required`);
+      const key = optString(x.key ?? null, `${f}.key`, { pattern: SENSOR_KEY_RE, patternMsg: `'${f}.key' is not a valid reading key` });
+      if (!key) fail(`'${f}.key' is required`);
+      return { deviceId, key, label: optString(x.label ?? null, `${f}.label`, { max: 40 }), unit: optString(x.unit ?? null, `${f}.unit`, { max: 16 }), color: optColor(x.color ?? null, `${f}.color`) };
+    });
+    tile.rangeH = pick(t.rangeH, `${field}.rangeH`, GRAPH_RANGES_H, 24);
+    tile.chart = pick(t.chart, `${field}.chart`, GRAPH_KINDS, "area");
+    tile.decimals = optInt(t.decimals, `${field}.decimals`, { min: 0, max: 4, fallback: null });
+    tile.min = optNumber(t.min, `${field}.min`);
+    tile.max = optNumber(t.max, `${field}.max`);
+    if (tile.min !== null && tile.max !== null && tile.min >= tile.max) fail(`'${field}.min' must be below '${field}.max'`);
+  }
+  if (type === "image") {
+    const image = optString(t.image ?? null, `${field}.image`, { max: 100 });
+    const m = image ? FILE_REF_RE.exec(image) : null;
+    if (image && !m) fail(`'${field}.image' must be "file:<uploaded id>"`);
+    tile.image = image;
+    if (m) imageRefs.push({ fileId: m[1], field: `${field}.image` });
+    tile.fit = pick(t.fit, `${field}.fit`, ["cover", "contain"], "cover");
+  }
   return tile;
 }
 
 /**
- * Validate a whole wall from PUT /api/wall. Returns { title, display, pages, deviceIds, iconRefs }.
+ * Validate a whole wall from PUT /api/wall. Returns { title, display, pages, deviceIds, iconRefs, imageRefs }.
  * Unknown fields are dropped.
  */
 function validateWall(body) {
@@ -271,6 +346,7 @@ function validateWall(body) {
     fail(`'pages' must be a list of 1 to ${MAX_PAGES} pages`);
   }
   const iconRefs = [];
+  const imageRefs = [];
   const tileIds = new Set();
   const pageIds = new Set();
   const deviceIds = new Set();
@@ -282,20 +358,29 @@ function validateWall(body) {
     pageIds.add(id);
     const tiles = p.tiles ?? [];
     if (!Array.isArray(tiles) || tiles.length > MAX_TILES_PER_PAGE) fail(`'pages[${i}].tiles' must be a list of at most ${MAX_TILES_PER_PAGE} tiles`);
+    const groups = p.groups ?? [];
+    if (!Array.isArray(groups) || groups.length > MAX_GROUPS_PER_PAGE) fail(`'pages[${i}].groups' must be a list of at most ${MAX_GROUPS_PER_PAGE} groups`);
     return {
       id,
       title: optString(p.title ?? null, `pages[${i}].title`, { max: 60 }),
       tiles: tiles.map((t, j) => {
-        const tile = validateTile(t, `pages[${i}].tiles[${j}]`, iconRefs);
+        const tile = validateTile(t, `pages[${i}].tiles[${j}]`, iconRefs, imageRefs);
         if (tileIds.has(tile.id)) fail(`Tile id '${tile.id}' is used twice`);
         tileIds.add(tile.id);
         if (tile.deviceId) deviceIds.add(tile.deviceId);
+        for (const x of tile.series || []) deviceIds.add(x.deviceId);
         return tile;
+      }),
+      groups: groups.map((g, j) => {
+        const group = validateGroup(g, `pages[${i}].groups[${j}]`, iconRefs);
+        if (tileIds.has(group.id)) fail(`Id '${group.id}' is used twice`);
+        tileIds.add(group.id);
+        return group;
       }),
     };
   });
   if (deviceIds.size > MAX_DEVICES) fail(`A wall can show at most ${MAX_DEVICES} devices`);
-  return { title, display, pages, deviceIds: [...deviceIds], iconRefs };
+  return { title, display, pages, deviceIds: [...deviceIds], iconRefs, imageRefs };
 }
 
 /** Roles that may put a device on a public wall. */
@@ -387,12 +472,42 @@ async function sensorHistory(db, deviceId, key) {
 }
 
 /**
+ * History for graph tiles over `hours`: averages in GRAPH_POINTS equal time buckets,
+ * computed in the database (a week of readings can be a lot of rows). The last hour is
+ * read exactly. Cached for a bucket's length, since open screens reload every minute.
+ */
+const historyCache = new Map();
+async function rangeHistory(db, deviceId, key, hours) {
+  if (hours <= 1) return sensorHistory(db, deviceId, key);
+  const bucket = (hours * 3600 * 1000) / GRAPH_POINTS;
+  const id = [deviceId, key, hours].join("|");
+  const hit = historyCache.get(id);
+  if (hit && Date.now() - hit.at < Math.min(bucket, 5 * 60 * 1000)) return hit.points;
+  const start = Date.now() - hours * 3600 * 1000;
+  const rows = await db
+    .collection("device_telemetry")
+    .aggregate([
+      { $match: { deviceId, createdAt: { $gte: new Date(start) } } },
+      // key is checked by SENSOR_KEY_RE: letters, digits, _ . - only, never "$"
+      { $project: { t: { $toLong: "$createdAt" }, v: "$" + key } },
+      { $match: { v: { $type: "number" } } },
+      { $group: { _id: { $floor: { $divide: [{ $subtract: ["$t", start] }, bucket] } }, t: { $avg: "$t" }, v: { $avg: "$v" } } },
+      { $sort: { _id: 1 } },
+    ])
+    .toArray();
+  const points = rows.filter((r) => Number.isFinite(r.v)).map((r) => [Math.round(r.t), Math.round(r.v * 1000) / 1000]);
+  if (historyCache.size > 2000) historyCache.clear();
+  historyCache.set(id, { at: Date.now(), points });
+  return points;
+}
+
+/**
  * Everything a screen needs, built from the database: the public wall (tiles without
  * device ids), device aliases with name and online state, current values and chart history.
  * Also returns `private` bookkeeping for the hub (never sent).
  */
 async function buildSnapshot(db, wall) {
-  const allIds = [...new Set(wall.pages.flatMap((p) => p.tiles.map((t) => t.deviceId).filter(Boolean)))];
+  const allIds = [...new Set(wall.pages.flatMap((p) => p.tiles.flatMap((t) => [t.deviceId, ...(t.series || []).map((x) => x.deviceId)]).filter(Boolean)))];
   const allowed = await publishableDevices(db, wall.userId, allIds);
   const ids = allIds.filter((id) => allowed.has(id));
 
@@ -421,14 +536,34 @@ async function buildSnapshot(db, wall) {
   const values = {};
   const history = {};
   const tiles = []; // [{ id, type, deviceId, key, chart }] for the hub
+  const ranges = []; // graph series: [{ id, deviceId, key, hours }]
   const pages = [];
+  const cellOf = (t) => ({ x: t.x, y: t.y, w: t.w, h: t.h });
   for (const p of wall.pages) {
     const out = [];
     for (const t of p.tiles) {
+      if (t.type === "graph") {
+        // Series of devices the owner can't publish any more are left out
+        const series = [];
+        (t.series || []).forEach((x, i) => {
+          if (!alias.has(x.deviceId)) return;
+          const entry = ui.get(x.deviceId)?.sensors?.find?.((e) => e?.key === x.key);
+          const sid = `${t.id}.${i}`;
+          series.push({ id: sid, dev: alias.get(x.deviceId), label: x.label || entry?.label || humanize(x.key), unit: x.unit || (entry?.unit ? String(entry.unit).slice(0, 16) : null), color: x.color });
+          tiles.push({ id: sid, type: "series", deviceId: x.deviceId, key: x.key, chart: true });
+          ranges.push({ id: sid, hours: t.rangeH || 24 });
+        });
+        if (!series.length) {
+          out.push({ id: t.id, type: t.type, size: t.size, ...cellOf(t), label: t.label || "Not available", unavailable: true });
+          continue;
+        }
+        out.push({ ...t, series });
+        continue;
+      }
       const { deviceId, ...pub } = t;
       if (deviceId) {
         if (!alias.has(deviceId)) {
-          out.push({ id: t.id, type: t.type, size: t.size, label: t.label || "Not available", unavailable: true });
+          out.push({ id: t.id, type: t.type, size: t.size, ...cellOf(t), label: t.label || "Not available", unavailable: true });
           continue;
         }
         pub.dev = alias.get(deviceId);
@@ -443,14 +578,15 @@ async function buildSnapshot(db, wall) {
       if (t.type === "actuator") delete pub.key;
       out.push(pub);
     }
-    pages.push({ id: p.id, title: p.title, tiles: out });
+    pages.push({ id: p.id, title: p.title, tiles: out, groups: p.groups || [] });
   }
 
+  const rangeOf = new Map(ranges.map((r) => [r.id, r.hours]));
   await Promise.all(
     tiles
       .filter((t) => t.chart)
       .map(async (t) => {
-        history[t.id] = await sensorHistory(db, t.deviceId, t.key);
+        history[t.id] = rangeOf.has(t.id) ? await rangeHistory(db, t.deviceId, t.key, rangeOf.get(t.id)) : await sensorHistory(db, t.deviceId, t.key);
       })
   );
 
@@ -473,7 +609,7 @@ function defaultWall() {
   return {
     title: "Wall display",
     display: validateDisplay({}),
-    pages: [{ id: "p1", title: null, tiles: [{ id: "clock", type: "clock", size: "m", label: null, icon: null, color: null, announce: false }] }],
+    pages: [{ id: "p1", title: null, tiles: [{ id: "clock", type: "clock", size: "m", x: 0, y: 0, w: 4, h: 2, label: null, icon: null, color: null, announce: false }] }],
   };
 }
 
@@ -517,6 +653,7 @@ module.exports = {
   sensorValue,
   actuatorValue,
   sensorHistory,
+  rangeHistory,
   defaultWall,
   findWallByUser,
   findWallByToken,
