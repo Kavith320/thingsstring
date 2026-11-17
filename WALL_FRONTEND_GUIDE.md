@@ -37,12 +37,15 @@ A wall display is a full-screen, read-only dashboard for a TV or monitor. The ow
   "display": {
     "theme": "dark",                              // auto | light | dark
     "accent": "#22c55e",                          // or null
-    "columns": 4,                                 // 2-8
+    "columns": 4,                                 // 2-8, old setting (replaced by canvas)
+    "canvas": { "width": 1920, "height": 1080,    // the screen the wall is designed for, 320-7680
+                "cols": 12, "rows": 6 },          // grid tiles snap to, 2-24 each
+    "notifySec": 8,                               // how long a pop-up notification stays, 3-120
     "textScale": 1,                               // 0.75-2
     "rotateSec": 0,                               // 0 = off, else 5-3600
     "showClock": true, "showFeed": true, "highlightSec": 6, "burnInShift": true,
-    "sound": { "enabled": false, "on": "all", "tone": "chime", "volume": 0.6 },   // on: all|alerts, tone: chime|beep|soft
-    "voice": { "enabled": false, "on": "all",
+    "sound": { "enabled": true, "on": "all", "tone": "chime", "volume": 0.6 },   // on: all|alerts, tone: chime|beep|soft
+    "voice": { "enabled": true, "on": "all",
                "engine": "natural",                      // natural = Piper voice in the browser | browser = the screen's own voices
                "naturalVoice": "en_US-hfc_female-medium", "volume": 1,
                "rate": 1, "pitch": 1, "lang": "en-GB", "voiceName": null },   // rate/pitch/lang/voiceName: browser engine
@@ -53,17 +56,31 @@ A wall display is a full-screen, read-only dashboard for a TV or monitor. The ow
       { "id": "t1", "type": "sensor", "deviceId": "…", "key": "env.soil", "label": "Soil", "unit": "%",
         "style": "number|gauge|chart", "decimals": 1, "min": 0, "max": 100,
         "warn": { "below": 35 }, "critical": { "below": 30, "above": 80 },
+        "x": 0, "y": 0, "w": 4, "h": 2,         // cells on the canvas grid (all four or none)
         "size": "s|m|l|t", "icon": "lucide:sprout", "color": "#22c55e", "announce": true },
       { "id": "t2", "type": "actuator", "deviceId": "…", "key": "pump" },
       { "id": "t3", "type": "status", "deviceId": "…" },
       { "id": "t4", "type": "clock" },
-      { "id": "t5", "type": "text", "text": "Call 077…" }        // ≤ 300
+      { "id": "t5", "type": "text", "text": "Call 077…" },       // ≤ 300
+      { "id": "t6", "type": "graph", "rangeH": 24,               // 1 | 6 | 24 | 72 | 168 hours
+        "chart": "area",                                          // area | line | bar
+        "series": [                                               // 1-4 readings, any devices
+          { "deviceId": "…", "key": "env.temp", "label": "Temperature", "unit": "°C", "color": "#f97316" } ],
+        "decimals": 1, "min": null, "max": null },                // y axis; null = automatic
+      { "id": "t7", "type": "image", "image": "file:<id>", "fit": "cover" }   // cover | contain
+    ],
+    "groups": [                                    // ≤ 16 per page; tiles fully inside belong to it
+      { "id": "g1", "label": "Hall A", "icon": "emoji:🏭", "color": "#f97316", "x": 0, "y": 3, "w": 6, "h": 3 }
     ]}
   ]
 }
 ```
 
-Sizes: `s` 1×1, `m` 2×1, `l` 2×2, `t` 1×2.
+Every tile may also have `"bg": "#1e3a8a"` (background colour; the screen picks dark or light text) and `"iconSize": "sm" | "md" | "lg"` (md/lg draw a big icon next to the value). Icons are `"lucide:…"`, `"emoji:🌱"` or `"file:<uploaded icon id>"`.
+
+Pictures for image tiles: `GET /api/files/images`, `POST /api/files/images` (raw PNG/JPEG/WebP body, ≤ 2 MB, at most 50 per user), `DELETE /api/files/images/:id`. A wall can only use the owner's own pictures (`kind: "image"`). They are served like icons from `/files/<id>` (unguessable id, no login).
+
+Layout: the canvas has the shape of `display.canvas` (width × height) and is split into `cols` × `rows` cells. A tile covers `w` × `h` cells from (`x`, `y`). Screens scale the whole canvas to fit; phones stack the tiles two to a row. Tiles without a position (walls saved before positions existed) are placed in the first free spot, sized from `size` (`s` 1×1, `m` 2×1, `l` 2×2, `t` 1×2, in sixths of the width and thirds of the height). The server checks ranges only; the editor keeps tiles from overlapping.
 
 ## 3. Public API (no login)
 
@@ -80,17 +97,18 @@ Sizes: `s` 1×1, `m` 2×1, `l` 2×2, `t` 1×2.
   "wall": { "title", "display", "pages": [{ "id", "title", "tiles": [{ "id", "type", "label", "unit", "dev": "d1", … }] }] },
   "devices": { "d1": { "name": "North greenhouse", "online": true, "lastSeen": "ISO" } },
   "values":  { "t1": 31.5, "t2": { "on": true, "auto": false } },
-  "history": { "t1": [[ms, value], …] },          // chart tiles: last hour, ≤ 60 points
+  "history": { "t1": [[ms, value], …],           // chart tiles: last hour, ≤ 60 points
+               "t6.0": [[ms, value], …] },        // graph lines: their range, averaged into ≤ 120 points
   "offlineAfterSec": 300, "serverTime": "ISO"
 }
 ```
 
-Labels and units are filled in from the device's display settings when the tile has none. A tile the owner can no longer publish comes back as `{ id, type, size, label, unavailable: true }`.
+Labels and units are filled in from the device's display settings when the tile has none. A tile the owner can no longer publish comes back as `{ id, type, size, x, y, w, h, label, unavailable: true }`.
 
 ### Stream events
 
 - `snapshot`: the whole thing (on connect, and after the owner edits the wall).
-- `update`: `{ values: {tileId: v}, devices: {d1: {...}}, points: {tileId: [ms, v]}, at }`. Only what changed. Sent on new telemetry (MQTT), actuator changes from any process (change stream), and devices going offline (checked every 10 s).
+- `update`: `{ values: {tileId: v}, devices: {d1: {...}}, points: {tileId | "<graphTileId>.<n>": [ms, v]}, at }`. Only what changed. Sent on new telemetry (MQTT), actuator changes from any process (change stream), and devices going offline (checked every 10 s).
 - `revoked`: `{ reason: "link" | "pin" | "expired" | "account" }`, then the stream closes. On `pin` or `expired`, get a new session (prompting for the PIN). On the others, show "not available".
 - A `: ping` comment every 20 s keeps proxies from closing the connection.
 

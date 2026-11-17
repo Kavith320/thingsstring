@@ -139,6 +139,11 @@ test("saving validates the wall", async () => {
     { display: { voice: { engine: "robot" } }, pages: [{ id: "p1", tiles: [] }] },
     { display: { voice: { naturalVoice: "../../etc/passwd" } }, pages: [{ id: "p1", tiles: [] }] },
     { display: { voice: { volume: 3 } }, pages: [{ id: "p1", tiles: [] }] },
+    { display: { canvas: { width: 100 } }, pages: [{ id: "p1", tiles: [] }] },
+    { display: { canvas: { cols: 40 } }, pages: [{ id: "p1", tiles: [] }] },
+    { pages: [{ id: "p1", tiles: [{ id: "x", type: "clock", x: 0 }] }] },
+    { pages: [{ id: "p1", tiles: [{ id: "x", type: "clock", x: 20, y: 0, w: 6, h: 1 }] }] },
+    { pages: [{ id: "p1", tiles: [{ id: "x", type: "clock", x: 0, y: 0, w: 0, h: 1 }] }] },
   ];
   for (const body of bad) {
     const r = await call(u, "PUT", "/api/wall", body);
@@ -157,6 +162,24 @@ test("voice settings are kept, with natural-voice defaults", async () => {
   assert.equal(r.status, 200);
   assert.equal(r.body.wall.display.voice.naturalVoice, "en_GB-jenny_dioco-medium");
   assert.equal(r.body.wall.display.voice.volume, 0.7);
+});
+
+test("canvas, tile positions and sound defaults are kept", async () => {
+  const u = await createUser(app.api);
+  let r = await call(u, "PUT", "/api/wall", { pages: [{ id: "p1", tiles: [] }] });
+  assert.deepEqual(r.body.wall.display.canvas, { width: 1920, height: 1080, cols: 12, rows: 6 });
+  assert.equal(r.body.wall.display.notifySec, 8);
+  assert.equal(r.body.wall.display.sound.enabled, true);
+  assert.equal(r.body.wall.display.voice.enabled, true);
+  r = await call(u, "PUT", "/api/wall", {
+    display: { canvas: { width: 1080, height: 1920, cols: 6, rows: 12 }, notifySec: 15 },
+    pages: [{ id: "p1", tiles: [{ id: "c", type: "clock", x: 2, y: 3, w: 4, h: 2 }, { id: "n", type: "text", text: "hi" }] }],
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.wall.display.canvas, { width: 1080, height: 1920, cols: 6, rows: 12 });
+  const [c, n] = r.body.wall.pages[0].tiles;
+  assert.deepEqual([c.x, c.y, c.w, c.h], [2, 3, 4, 2]);
+  assert.equal(n.x, undefined);
 });
 
 test("only devices you own or manage can go on a wall", async () => {
@@ -307,6 +330,84 @@ test("a disabled account's wall stops", async () => {
 });
 
 // ---------------------------------------------------------------- live stream
+
+test("graphs, pictures, colours, big icons and groups", async () => {
+  const owner = await createUser(app.api);
+  await verify(owner);
+  await createDevice(db, "dev-secret-id", owner.id);
+  // A day of readings, plus one a stranger owns
+  const now = Date.now();
+  await db.collection("device_telemetry").insertMany(
+    Array.from({ length: 48 }, (_, i) => ({ deviceId: "dev-secret-id", createdAt: new Date(now - i * 30 * 60 * 1000), data: { temp: 20 + (i % 5) } }))
+  );
+
+  // Upload a picture (PNG signature is enough for the sniffing)
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
+  const up = await fetch(app.base + "/api/files/images", { method: "POST", headers: { authorization: `Bearer ${owner.token}`, "content-type": "image/png" }, body: png });
+  assert.equal(up.status, 201);
+  const image = (await up.json()).image;
+  const list = await call(owner, "GET", "/api/files/images");
+  assert.equal(list.body.images.length, 1);
+
+  const page = {
+    id: "p1",
+    tiles: [
+      { id: "g", type: "graph", x: 0, y: 0, w: 6, h: 3, rangeH: 24, chart: "line", series: [{ deviceId: "dev-secret-id", key: "data.temp", color: "#22c55e" }, { deviceId: "someone-elses", key: "x" }] },
+      { id: "img", type: "image", image: image.ref, fit: "contain", label: "Factory", x: 6, y: 0, w: 4, h: 3 },
+      { id: "t", type: "sensor", deviceId: "dev-secret-id", key: "data.temp", bg: "#1e3a8a", iconSize: "lg", icon: "emoji:🌡️", x: 0, y: 3, w: 2, h: 2 },
+    ],
+    groups: [{ id: "grp", label: "Hall A", icon: "emoji:🏭", color: "#f97316", x: 0, y: 3, w: 6, h: 3 }],
+  };
+  // Someone else's device in a graph is refused
+  let r = await call(owner, "PUT", "/api/wall", { pages: [page] });
+  assert.equal(r.status, 403);
+  page.tiles[0].series.pop();
+  r = await call(owner, "PUT", "/api/wall", { pages: [page] });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const saved = r.body.wall.pages[0];
+  assert.equal(saved.tiles[2].bg, "#1e3a8a");
+  assert.equal(saved.tiles[2].iconSize, "lg");
+  assert.deepEqual(saved.groups[0], { id: "grp", label: "Hall A", icon: "emoji:🏭", color: "#f97316", x: 0, y: 3, w: 6, h: 3 });
+
+  // Someone else's picture can't be used
+  const other = await createUser(app.api);
+  r = await call(other, "PUT", "/api/wall", { pages: [{ id: "p1", tiles: [{ id: "img", type: "image", image: image.ref }] }] });
+  assert.equal(r.status, 400);
+
+  const bad = [
+    { id: "g", type: "graph", series: [] },
+    { id: "g", type: "graph", series: [{ deviceId: "dev-secret-id", key: "$where" }] },
+    { id: "g", type: "graph", rangeH: 5, series: [{ deviceId: "dev-secret-id", key: "a" }] },
+    { id: "i", type: "image", image: "https://example.com/x.png" },
+    { id: "c", type: "clock", iconSize: "huge" },
+    { id: "c", type: "clock", bg: "red; background:url(x)" },
+  ];
+  for (const t of bad) assert.equal((await call(owner, "PUT", "/api/wall", { pages: [{ id: "p1", tiles: [t] }] })).status, 400, JSON.stringify(t));
+  assert.equal((await call(owner, "PUT", "/api/wall", { pages: [{ id: "p1", tiles: [], groups: [{ id: "g", label: "No place" }] }] })).status, 400);
+
+  // The screen gets the graph's lines (device as an alias), bucketed history and the group
+  const linked = await call(owner, "POST", "/api/wall/link");
+  const s = (await session(linked.body.link.token)).body.session;
+  const snap = (await pub("GET", "/api/public/wall/snapshot", { session: s })).body;
+  const g = snap.wall.pages[0].tiles.find((t) => t.id === "g");
+  assert.deepEqual(g.series.map((x) => [x.id, x.dev, x.label]), [["g.0", "d1", "Temp"]]);
+  assert.ok(!JSON.stringify(snap).includes("dev-secret-id"));
+  const hist = snap.history["g.0"];
+  assert.ok(hist.length >= 40 && hist.length <= 120, `history points: ${hist.length}`);
+  assert.ok(hist.every(([t, v], i) => (i === 0 || t > hist[i - 1][0]) && v >= 20 && v <= 31));
+  assert.equal(snap.wall.pages[0].groups[0].label, "Hall A");
+  assert.equal(snap.wall.pages[0].tiles.find((t) => t.id === "img").image, image.ref);
+
+  // Live points for the graph line
+  const st = await openStream(s);
+  await st.next("snapshot");
+  deviceBus.emit("telemetry", "dev-secret-id", { deviceId: "dev-secret-id", createdAt: new Date(), data: { temp: 27 } });
+  const u = await st.next("update");
+  assert.equal(u.points["g.0"][1], 27);
+  st.close();
+
+  assert.equal((await call(owner, "DELETE", `/api/files/images/${image.id}`)).status, 200);
+});
 
 test("the stream sends a snapshot, then only changes", async () => {
   const { token } = await setup();

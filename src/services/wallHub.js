@@ -122,6 +122,12 @@ class Room {
     const update = { values: {}, devices: {}, points: {} };
     const t = new Date(doc.createdAt || Date.now()).getTime();
     for (const tile of tiles) {
+      if (tile.type === "series") {
+        // Graph lines: only new points, the graph shows its own latest value
+        const p = sensorValue(doc, tile.key);
+        if (typeof p === "number") update.points[tile.id] = [t, p];
+        continue;
+      }
       if (tile.type !== "sensor") continue;
       const v = sensorValue(doc, tile.key);
       if (v === null) continue; // a partial message doesn't blank a reading
